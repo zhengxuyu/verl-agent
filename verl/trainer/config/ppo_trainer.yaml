@@ -252,6 +252,12 @@ algorithm:
     mode: "mean_norm" # "mean_norm" or "mean_std_norm"
     enable_similarity: False # whether to use similarity-based anchor state grouping in GiGPO (supported for text-only tasks)
     similarity_thresh: 0.95 # similarity threshold for GiGPO (0.0, 1.0)
+    history_replay:
+      enable: False
+      save_path: null   # path to save collected historical trajectories (DataProto pickle)
+      load_path: null   # optional path to load historical trajectories; if null, save_path will be used as load source
+      max_trajs_per_task: -1  # max historical trajectories replayed per task at training time; <=0 means replay all saved
+      max_saved_trajs_per_task: -1  # max stored trajectories per task across runs; <=0 means no cap
   residual_reward:
     enable: False
     reward_type: "residual"    # "residual", "success_rate", or "contextual_success_rate"

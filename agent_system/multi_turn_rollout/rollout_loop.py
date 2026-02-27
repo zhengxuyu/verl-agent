@@ -61,6 +61,11 @@ class TrajectoryCollector:
 
         raw_prompt = gen_batch.non_tensor_batch['raw_prompt'][item]
         data_source = gen_batch.non_tensor_batch['data_source'][item]
+        # Keep a stable per-task identifier from dataset metadata for cross-run trajectory replay.
+        source_index = gen_batch.non_tensor_batch['index'][item] if 'index' in gen_batch.non_tensor_batch else item
+        if isinstance(source_index, np.generic):
+            source_index = source_index.item()
+        task_uid = f"{data_source}::{source_index}"
         apply_chat_template_kwargs = self.config.data.get("apply_chat_template_kwargs", {})
         
         # Get observation components
@@ -178,7 +183,9 @@ class TrajectoryCollector:
             'position_ids': position_ids[0],
             'raw_prompt_ids': raw_prompt_ids,
             'anchor_obs': _obs_anchor,
-            'index': item,
+            # `index` should remain the dataset index (not in-batch offset) for stable task mapping.
+            'index': source_index,
+            'task_uid': task_uid,
             'data_source': data_source
         })
 

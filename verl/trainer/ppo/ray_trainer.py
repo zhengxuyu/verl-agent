@@ -28,7 +28,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pprint import pprint
-from typing import Dict, Optional, Type
+from typing import Dict, List, Optional, Type
 
 import numpy as np
 import ray
@@ -508,6 +508,211 @@ class RayPPOTrainer:
             self._residual_stats_count = 0
             self._residual_running_mean = 0.0
             self._residual_running_var = 1.0
+
+        self._init_history_replay()
+
+    def _resolve_optional_local_path(self, path: Optional[str]) -> Optional[str]:
+        if path is None:
+            return None
+        path = os.path.expanduser(path)
+        if not os.path.isabs(path):
+            path = os.path.join(os.getcwd(), path)
+        return path
+
+    def _init_history_replay(self):
+        cfg = OmegaConf.select(self.config, "algorithm.gigpo.history_replay", default=None)
+        self.history_replay_enable = bool(cfg is not None and cfg.get("enable", False))
+        self.history_replay_save_path = self._resolve_optional_local_path(cfg.get("save_path", None)) if cfg is not None else None
+        self.history_replay_load_path = self._resolve_optional_local_path(cfg.get("load_path", None)) if cfg is not None else None
+        self.history_replay_max_trajs_per_task = int(cfg.get("max_trajs_per_task", -1)) if cfg is not None else -1
+        self.history_replay_max_saved_trajs_per_task = int(cfg.get("max_saved_trajs_per_task", -1)) if cfg is not None else -1
+
+        self.history_replay_data: Optional[DataProto] = None
+        self.history_replay_task_to_trajs: Dict[str, List[np.ndarray]] = {}
+
+        if not self.history_replay_enable:
+            return
+
+        if self.history_replay_save_path is None and self.history_replay_load_path is not None:
+            # If only load_path is provided, persist updates back to the same file by default.
+            self.history_replay_save_path = self.history_replay_load_path
+
+        effective_load_path = self.history_replay_load_path or self.history_replay_save_path
+        if effective_load_path is not None:
+            if os.path.exists(effective_load_path):
+                self.history_replay_data = DataProto.load_from_disk(effective_load_path)
+                self._rebuild_history_replay_index()
+                print(
+                    f"[HistoryReplay] Loaded {len(self.history_replay_data)} rows from "
+                    f"{effective_load_path} for {len(self.history_replay_task_to_trajs)} tasks."
+                )
+            else:
+                print(
+                    f"[HistoryReplay] load path {effective_load_path} does not exist. "
+                    "Skip loading historical trajectories."
+                )
+
+    def _rebuild_history_replay_index(self):
+        self.history_replay_task_to_trajs = {}
+        if self.history_replay_data is None or len(self.history_replay_data) == 0:
+            return
+
+        if "task_uid" not in self.history_replay_data.non_tensor_batch or "traj_uid" not in self.history_replay_data.non_tensor_batch:
+            print("[HistoryReplay] Missing task_uid/traj_uid in loaded data. Disable replay for this run.")
+            self.history_replay_data = None
+            return
+
+        task_uids = self.history_replay_data.non_tensor_batch["task_uid"]
+        traj_uids = self.history_replay_data.non_tensor_batch["traj_uid"]
+        task_to_trajs = defaultdict(list)
+
+        for task_uid in np.unique(task_uids):
+            task_indices = np.where(task_uids == task_uid)[0]
+            task_traj_uids = traj_uids[task_indices]
+            for traj_uid in np.unique(task_traj_uids):
+                traj_indices = task_indices[task_traj_uids == traj_uid]
+                task_to_trajs[str(task_uid)].append(traj_indices.astype(np.int64))
+
+        self.history_replay_task_to_trajs = dict(task_to_trajs)
+
+    def _collect_history_replay_from_batch(self, batch: DataProto):
+        if not self.history_replay_enable or self.history_replay_save_path is None:
+            return 0, 0, 0
+        if "task_uid" not in batch.non_tensor_batch or "traj_uid" not in batch.non_tensor_batch:
+            return 0, 0, 0
+
+        task_uids = batch.non_tensor_batch["task_uid"]
+        traj_uids = batch.non_tensor_batch["traj_uid"]
+        pending_tasks: set[str] = set()
+        new_chunks: List[DataProto] = []
+        collected_traj_count = 0
+
+        for task_uid in np.unique(task_uids):
+            task_uid_str = str(task_uid)
+            task_indices = np.where(task_uids == task_uid)[0]
+            task_traj_uids = traj_uids[task_indices]
+            unique_task_traj_uids = np.unique(task_traj_uids)
+
+            existing_cnt = len(self.history_replay_task_to_trajs.get(task_uid_str, []))
+            if self.history_replay_max_saved_trajs_per_task > 0:
+                remaining = self.history_replay_max_saved_trajs_per_task - existing_cnt
+                if remaining <= 0:
+                    continue
+                selected_task_traj_uids = unique_task_traj_uids[:remaining]
+            else:
+                selected_task_traj_uids = unique_task_traj_uids
+
+            if len(selected_task_traj_uids) == 0:
+                continue
+
+            pending_tasks.add(task_uid_str)
+            for selected_traj_uid in selected_task_traj_uids:
+                selected_indices = task_indices[task_traj_uids == selected_traj_uid]
+                traj_batch = batch.select_idxs(selected_indices).to("cpu")
+                new_chunks.append(traj_batch)
+                collected_traj_count += 1
+
+        if not new_chunks:
+            return 0, 0, 0
+
+        new_data = DataProto.concat(new_chunks) if len(new_chunks) > 1 else new_chunks[0]
+        if self.history_replay_data is None:
+            self.history_replay_data = new_data
+        else:
+            if set(self.history_replay_data.batch.keys()) != set(new_data.batch.keys()):
+                print("[HistoryReplay] Tensor keys mismatch while appending. Skip new history trajectories.")
+                return 0, 0, 0
+            if set(self.history_replay_data.non_tensor_batch.keys()) != set(new_data.non_tensor_batch.keys()):
+                print("[HistoryReplay] Non-tensor keys mismatch while appending. Skip new history trajectories.")
+                return 0, 0, 0
+            self.history_replay_data = DataProto.concat([self.history_replay_data, new_data])
+
+        self._rebuild_history_replay_index()
+        return len(pending_tasks), len(new_data), collected_traj_count
+
+    def _merge_history_replay_into_batch(self, batch: DataProto):
+        if not self.history_replay_enable or self.history_replay_data is None:
+            return batch, 0, 0
+        if "task_uid" not in batch.non_tensor_batch or "uid" not in batch.non_tensor_batch:
+            return batch, 0, 0
+
+        # Mark current rollout rows so we can remove historical rows before gradient updates.
+        if "is_history_replay" not in batch.non_tensor_batch:
+            batch.non_tensor_batch["is_history_replay"] = np.zeros(len(batch), dtype=bool)
+
+        task_uids = batch.non_tensor_batch["task_uid"]
+        uids = batch.non_tensor_batch["uid"]
+        history_chunks: List[DataProto] = []
+        history_traj_count = 0
+
+        for task_uid in np.unique(task_uids):
+            task_uid_str = str(task_uid)
+            matched_trajs = self.history_replay_task_to_trajs.get(task_uid_str, [])
+            if not matched_trajs:
+                continue
+            current_uid = uids[np.where(task_uids == task_uid)[0][0]]
+            selected_hist_trajs = matched_trajs if self.history_replay_max_trajs_per_task <= 0 else matched_trajs[: self.history_replay_max_trajs_per_task]
+            for traj_indices in selected_hist_trajs:
+                hist_batch = self.history_replay_data.select_idxs(traj_indices).to(batch.batch.device)
+                hist_batch.non_tensor_batch["uid"] = np.array([current_uid for _ in range(len(hist_batch))], dtype=object)
+                hist_batch.non_tensor_batch["traj_uid"] = np.array(
+                    [f"history::{uid}" for uid in hist_batch.non_tensor_batch["traj_uid"]],
+                    dtype=object,
+                )
+                hist_batch.non_tensor_batch["is_history_replay"] = np.ones(len(hist_batch), dtype=bool)
+                history_chunks.append(hist_batch)
+                history_traj_count += 1
+
+        if not history_chunks:
+            return batch, 0, 0
+
+        history_batch = DataProto.concat(history_chunks) if len(history_chunks) > 1 else history_chunks[0]
+        if set(history_batch.batch.keys()) != set(batch.batch.keys()):
+            print("[HistoryReplay] Tensor keys mismatch between current and history batch. Skip replay merge.")
+            return batch, 0, 0
+        if set(history_batch.non_tensor_batch.keys()) != set(batch.non_tensor_batch.keys()):
+            print("[HistoryReplay] Non-tensor keys mismatch between current and history batch. Skip replay merge.")
+            return batch, 0, 0
+
+        merged = DataProto.concat([batch, history_batch])
+        return merged, history_traj_count, len(history_batch)
+
+    def _prepare_onpolicy_update_batch(self, batch: DataProto):
+        """
+        Keep only current-policy rollout rows for gradient updates.
+        Historical replay rows are retained only for richer reward/advantage estimation.
+        """
+        if "is_history_replay" not in batch.non_tensor_batch:
+            return batch, 0
+
+        is_history = batch.non_tensor_batch["is_history_replay"].astype(bool)
+        history_row_count = int(is_history.sum())
+        if history_row_count == 0:
+            return batch, 0
+
+        keep_mask = np.logical_not(is_history)
+        if not np.any(keep_mask):
+            return batch, 0
+
+        batch_for_update = batch.select_idxs(keep_mask)
+        # Keep divisibility guarantees for worker micro-batches after history rows are removed.
+        batch_for_update = adjust_batch(self.config, batch_for_update)
+        return batch_for_update, history_row_count
+
+    def _persist_history_replay(self):
+        if not self.history_replay_enable or self.history_replay_save_path is None:
+            return
+        if self.history_replay_data is None or len(self.history_replay_data) == 0:
+            return
+
+        save_dir = os.path.dirname(self.history_replay_save_path)
+        if save_dir:
+            os.makedirs(save_dir, exist_ok=True)
+        self.history_replay_data.save_to_disk(self.history_replay_save_path)
+        print(
+            f"[HistoryReplay] Saved {len(self.history_replay_data)} rows "
+            f"({len(self.history_replay_task_to_trajs)} tasks) to {self.history_replay_save_path}."
+        )
 
     def _validate_config(self):
         config = self.config
@@ -991,6 +1196,8 @@ class RayPPOTrainer:
             buffer_path = os.path.join(local_global_step_folder, "trajectory_buffer")
             self.trajectory_buffer.save(buffer_path)
 
+        self._persist_history_replay()
+
         # latest checkpointed iteration tracker (for atomic usage)
         local_latest_checkpointed_iteration = os.path.join(self.config.trainer.default_local_dir, "latest_checkpointed_iteration.txt")
         with open(local_latest_checkpointed_iteration, "w") as f:
@@ -1182,6 +1389,18 @@ class RayPPOTrainer:
                     # batch = batch.union(gen_batch_output)
                     del batch
                     batch = gen_batch_output
+
+                    collected_task_count, collected_row_count, collected_traj_count = self._collect_history_replay_from_batch(batch)
+                    if collected_task_count > 0:
+                        metrics["history_replay/collected_tasks"] = collected_task_count
+                        metrics["history_replay/collected_trajs"] = collected_traj_count
+                        metrics["history_replay/collected_rows"] = collected_row_count
+                        metrics["history_replay/stored_tasks"] = len(self.history_replay_task_to_trajs)
+
+                    batch, replay_traj_count, replay_row_count = self._merge_history_replay_into_batch(batch)
+                    if replay_traj_count > 0:
+                        metrics["history_replay/replayed_trajs"] = replay_traj_count
+                        metrics["history_replay/replayed_rows"] = replay_row_count
 
                     if self.config.algorithm.adv_estimator == AdvantageEstimator.GiGPO:
                         step_rewards_tensor = core_gigpo.compute_step_discounted_returns(
@@ -1408,6 +1627,11 @@ class RayPPOTrainer:
                             metrics['advantage_residual/residual_mean'] = adv_residual.mean().item()
                             metrics['advantage_residual/residual_std'] = adv_residual.std().item()
 
+                        batch, history_update_filtered_rows = self._prepare_onpolicy_update_batch(batch)
+                        if history_update_filtered_rows > 0:
+                            metrics["history_replay/filtered_for_update_rows"] = history_update_filtered_rows
+                            metrics["history_replay/update_batch_rows"] = len(batch)
+
                     # update critic
                     if self.use_critic:
                         with _timer("update_critic", timing_raw):
@@ -1472,6 +1696,9 @@ class RayPPOTrainer:
                 progress_bar.update(1)
                 self.global_steps += 1
                 if is_last_step:
+                    self._persist_history_replay()
                     pprint(f"Final validation metrics: {last_val_metrics}")
                     progress_bar.close()
                     return
+
+        self._persist_history_replay()
