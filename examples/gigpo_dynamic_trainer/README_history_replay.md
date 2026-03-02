@@ -44,6 +44,8 @@
 - `algorithm.gigpo.history_replay.load_path`
 - `algorithm.gigpo.history_replay.max_trajs_per_task`
 - `algorithm.gigpo.history_replay.max_saved_trajs_per_task`
+- `algorithm.gigpo.history_replay.debug_log_path`
+- `algorithm.gigpo.history_replay.debug_text_max_chars`
 
 说明：
 
@@ -51,6 +53,10 @@
   - `<=0` 表示回放该任务下所有已保存轨迹（默认 `-1`）。
 - `max_saved_trajs_per_task`：每个任务最多保存多少条历史轨迹（跨轮累计）。
   - `<=0` 表示不设上限（默认 `-1`）。
+- `debug_log_path`：history replay 诊断日志文件路径（每步、每任务详细记录）。
+  - 默认：`{save_path}.inspect.log`（若无 `save_path`，则当前目录 `history_replay.inspect.log`）。
+- `debug_text_max_chars`：日志中单条文本最大字符数，超长会截断。
+  - `<=0` 表示不截断。
 
 ### 3.3 训练器中的 history replay 管线
 
@@ -89,6 +95,12 @@
    - checkpoint 保存时落盘。
    - 训练结束时再落盘一次。
 
+6. 诊断日志：
+   - 每个 training step、每个 task 会输出并写入日志：
+     - task 的 query 文本（由 prompt 解码）
+     - 当前 policy 生成的 group 内所有 rollout 轨迹（按 step 列出 action 与环境 reward）
+     - 该 task 的历史轨迹（本步选中用于 merge 的部分，按 step 列出 action 与环境 reward）
+
 ## 4. 当前语义（与你目标对齐）
 
 以 `batch_size=1, rollout_n=8` 为例：
@@ -106,6 +118,8 @@ algorithm.gigpo.history_replay.save_path=/path/to/history.pkl
 algorithm.gigpo.history_replay.load_path=/path/to/history.pkl
 algorithm.gigpo.history_replay.max_trajs_per_task=-1
 algorithm.gigpo.history_replay.max_saved_trajs_per_task=-1
+algorithm.gigpo.history_replay.debug_log_path=/path/to/history.inspect.log
+algorithm.gigpo.history_replay.debug_text_max_chars=512
 ```
 
 备注：

@@ -526,6 +526,8 @@ class RayPPOTrainer:
         self.history_replay_load_path = self._resolve_optional_local_path(cfg.get("load_path", None)) if cfg is not None else None
         self.history_replay_max_trajs_per_task = int(cfg.get("max_trajs_per_task", -1)) if cfg is not None else -1
         self.history_replay_max_saved_trajs_per_task = int(cfg.get("max_saved_trajs_per_task", -1)) if cfg is not None else -1
+        self.history_replay_debug_log_path = self._resolve_optional_local_path(cfg.get("debug_log_path", None)) if cfg is not None else None
+        self.history_replay_debug_text_max_chars = int(cfg.get("debug_text_max_chars", 512)) if cfg is not None else 512
 
         self.history_replay_data: Optional[DataProto] = None
         self.history_replay_task_to_trajs: Dict[str, List[np.ndarray]] = {}
@@ -536,6 +538,18 @@ class RayPPOTrainer:
         if self.history_replay_save_path is None and self.history_replay_load_path is not None:
             # If only load_path is provided, persist updates back to the same file by default.
             self.history_replay_save_path = self.history_replay_load_path
+
+        if self.history_replay_debug_log_path is None:
+            if self.history_replay_save_path is not None:
+                self.history_replay_debug_log_path = f"{self.history_replay_save_path}.inspect.log"
+            else:
+                self.history_replay_debug_log_path = os.path.join(os.getcwd(), "history_replay.inspect.log")
+
+        debug_dir = os.path.dirname(self.history_replay_debug_log_path)
+        if debug_dir:
+            os.makedirs(debug_dir, exist_ok=True)
+        with open(self.history_replay_debug_log_path, "a", encoding="utf-8") as f:
+            f.write(f"\n\n===== HistoryReplay Debug Start: global_step={self.global_steps} =====\n")
 
         effective_load_path = self.history_replay_load_path or self.history_replay_save_path
         if effective_load_path is not None:
@@ -551,6 +565,91 @@ class RayPPOTrainer:
                     f"[HistoryReplay] load path {effective_load_path} does not exist. "
                     "Skip loading historical trajectories."
                 )
+
+    def _truncate_debug_text(self, text: str) -> str:
+        text = text.replace("\n", "\\n")
+        if self.history_replay_debug_text_max_chars <= 0:
+            return text
+        if len(text) <= self.history_replay_debug_text_max_chars:
+            return text
+        return text[: self.history_replay_debug_text_max_chars] + "...(truncated)"
+
+    def _decode_rows_for_debug(self, token_tensor: torch.Tensor, row_indices: np.ndarray) -> List[str]:
+        texts: List[str] = []
+        for idx in row_indices.tolist():
+            token_ids = token_tensor[int(idx)].detach().cpu().tolist()
+            text = self.tokenizer.decode(token_ids, skip_special_tokens=True)
+            texts.append(self._truncate_debug_text(text))
+        return texts
+
+    def _write_history_replay_debug_log(self, content: str):
+        if self.history_replay_debug_log_path is None:
+            return
+        with open(self.history_replay_debug_log_path, "a", encoding="utf-8") as f:
+            f.write(content + "\n")
+
+    def _debug_dump_replay_for_step(self, batch: DataProto):
+        if not self.history_replay_enable:
+            return
+        if self.history_replay_debug_log_path is None:
+            return
+        required_non_tensor_keys = ["task_uid", "uid", "traj_uid"]
+        if any(key not in batch.non_tensor_batch for key in required_non_tensor_keys):
+            return
+        required_tensor_keys = ["prompts", "responses"]
+        if any(key not in batch.batch.keys() for key in required_tensor_keys):
+            return
+
+        task_uids = batch.non_tensor_batch["task_uid"]
+        group_uids = batch.non_tensor_batch["uid"]
+        traj_uids = batch.non_tensor_batch["traj_uid"]
+        rewards = batch.non_tensor_batch.get("rewards", None)
+
+        lines: List[str] = []
+        lines.append(f"[HistoryReplayDebug] global_step={self.global_steps}")
+        for task_uid in np.unique(task_uids):
+            task_uid_str = str(task_uid)
+            task_indices = np.where(task_uids == task_uid)[0]
+            group_uid = str(group_uids[task_indices[0]])
+            task_prompts = self._decode_rows_for_debug(batch.batch["prompts"], np.array([task_indices[0]], dtype=np.int64))
+            query_text = task_prompts[0] if task_prompts else ""
+            lines.append(f"  [Task] task_uid={task_uid_str} group_uid={group_uid} rows={len(task_indices)}")
+            lines.append(f"    query={query_text}")
+
+            task_traj_uids = traj_uids[task_indices]
+            unique_task_traj_uids = np.unique(task_traj_uids)
+            lines.append(f"    current_trajs={len(unique_task_traj_uids)}")
+            for traj_uid in unique_task_traj_uids:
+                traj_indices = task_indices[task_traj_uids == traj_uid]
+                response_texts = self._decode_rows_for_debug(batch.batch["responses"], traj_indices.astype(np.int64))
+                lines.append(f"      - current_traj_uid={traj_uid} steps={len(traj_indices)}")
+                for step_i, resp in enumerate(response_texts):
+                    if rewards is not None:
+                        step_reward = float(rewards[traj_indices[step_i]])
+                        lines.append(f"          step={step_i} reward={step_reward:.4f} action={resp}")
+                    else:
+                        lines.append(f"          step={step_i} action={resp}")
+
+            matched_trajs = self.history_replay_task_to_trajs.get(task_uid_str, [])
+            selected_hist_trajs = matched_trajs if self.history_replay_max_trajs_per_task <= 0 else matched_trajs[: self.history_replay_max_trajs_per_task]
+            lines.append(f"    history_trajs_total={len(matched_trajs)} selected_for_merge={len(selected_hist_trajs)}")
+            for hist_i, traj_indices in enumerate(selected_hist_trajs):
+                hist_batch = self.history_replay_data.select_idxs(traj_indices)
+                hist_traj_uid = str(hist_batch.non_tensor_batch["traj_uid"][0]) if len(hist_batch) > 0 else "unknown"
+                hist_indices = np.arange(len(hist_batch), dtype=np.int64)
+                hist_responses = self._decode_rows_for_debug(hist_batch.batch["responses"], hist_indices)
+                hist_rewards = hist_batch.non_tensor_batch.get("rewards", None)
+                lines.append(f"      - history_traj[{hist_i}] hist_traj_uid={hist_traj_uid} steps={len(hist_batch)}")
+                for step_i, resp in enumerate(hist_responses):
+                    if hist_rewards is not None:
+                        step_reward = float(hist_rewards[step_i])
+                        lines.append(f"          step={step_i} reward={step_reward:.4f} action={resp}")
+                    else:
+                        lines.append(f"          step={step_i} action={resp}")
+
+        debug_blob = "\n".join(lines)
+        print(debug_blob)
+        self._write_history_replay_debug_log(debug_blob)
 
     def _rebuild_history_replay_index(self):
         self.history_replay_task_to_trajs = {}
@@ -1389,6 +1488,8 @@ class RayPPOTrainer:
                     # batch = batch.union(gen_batch_output)
                     del batch
                     batch = gen_batch_output
+
+                    self._debug_dump_replay_for_step(batch)
 
                     collected_task_count, collected_row_count, collected_traj_count = self._collect_history_replay_from_batch(batch)
                     if collected_task_count > 0:
