@@ -516,6 +516,119 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
                 success['webshop_task_score (not success_rate)'].append(score_value)
                 return
 
+class ArcAgi3EnvironmentManager(EnvironmentManagerBase):
+    """Environment manager for ARC-AGI-3 games with level tracking."""
+
+    ACTION_LOOKUP = {
+        0: "Invalid", 1: "Up", 2: "Down", 3: "Left",
+        4: "Right", 5: "Enter", 6: "Click", 7: "Undo",
+    }
+
+    def __init__(self, envs, projection_f, config):
+        self.memory = SimpleMemory()
+        # Stats tracking for wandb
+        self.total_levels_cleared = 0
+        self.total_episodes = 0
+        self.total_rewards = 0.0
+        self.episode_levels = []  # levels cleared per episode
+        super().__init__(envs, projection_f, config)
+
+    def reset(self, kwargs=None):
+        obs, infos = self.envs.reset()
+        obs = np.array(obs, obs[0].dtype)
+
+        observations = {
+            'text': self.build_text_obs(infos, init=True),
+            'image': obs,
+            'anchor': obs,
+        }
+        self.memory.reset(batch_size=len(infos))
+        self.total_episodes += len(infos)
+        return observations, infos
+
+    def step(self, text_actions: List[str]):
+        actions, valids = self.projection_f(text_actions)
+
+        next_obs, rewards, dones, infos = self.envs.step(actions)
+
+        for i, info in enumerate(infos):
+            info['is_action_valid'] = to_numpy(valids[i])
+
+        # Track levels cleared for wandb logging
+        for info in infos:
+            if info.get('levels_cleared', 0) > 0:
+                self.total_levels_cleared += info['levels_cleared']
+
+        self.memory.store({
+            'text_obs': [None] * len(actions),  # visual only
+            'action': [self.ACTION_LOOKUP.get(act, "Invalid") for act in actions],
+        })
+
+        next_obs = np.array(next_obs, next_obs[0].dtype)
+        next_observations = {
+            'text': self.build_text_obs(infos),
+            'image': next_obs,
+            'anchor': next_obs,
+        }
+
+        rewards = to_numpy(rewards)
+        dones = to_numpy(dones)
+
+        # Accumulate rewards
+        self.total_rewards += float(rewards.sum())
+
+        # Track per-episode levels on done
+        for i, done in enumerate(dones):
+            if done:
+                lc = infos[i].get('levels_cleared', 0)
+                self.episode_levels.append(lc)
+
+        return next_observations, rewards, dones, infos
+
+    def get_stats(self):
+        """Return stats dict for wandb logging. Called by trainer."""
+        stats = {
+            'arcagi3/total_levels_cleared': self.total_levels_cleared,
+            'arcagi3/total_episodes': self.total_episodes,
+            'arcagi3/total_rewards': self.total_rewards,
+            'arcagi3/avg_levels_per_episode': (
+                np.mean(self.episode_levels) if self.episode_levels else 0.0
+            ),
+            'arcagi3/max_levels_in_episode': (
+                max(self.episode_levels) if self.episode_levels else 0
+            ),
+            'arcagi3/episodes_with_levels': (
+                sum(1 for l in self.episode_levels if l > 0)
+            ),
+        }
+        return stats
+
+    def build_text_obs(self, infos, init=False):
+        from agent_system.environments.prompts.arcagi3 import (
+            ARCAGI3_VISUAL_TEMPLATE, ARCAGI3_VISUAL_TEMPLATE_WITH_HISTORY
+        )
+
+        postprocess = []
+        if not init and self.config.env.history_length > 0:
+            memory_contexts, valid_lens = self.memory.fetch(
+                self.config.env.history_length,
+                obs_key="text_obs",
+                action_key="action")
+
+        for i in range(len(infos)):
+            if init or self.config.env.history_length <= 0:
+                obs = ARCAGI3_VISUAL_TEMPLATE
+            else:
+                obs = ARCAGI3_VISUAL_TEMPLATE_WITH_HISTORY.format(
+                    step_count=len(self.memory[i]),
+                    history_length=valid_lens[i],
+                    action_history=memory_contexts[i],
+                    current_step=len(self.memory[i]) + 1,
+                )
+            postprocess.append(obs)
+        return postprocess
+
+
 class AppWorldEnvironmentManager(EnvironmentManagerBase):
     def __init__(self, envs, projection_f, config):
         self.memory = SimpleMemory()
@@ -694,6 +807,21 @@ def make_envs(config):
         envs = AppWorldEnvironmentManager(_envs, projection_f, config)
         val_envs = AppWorldEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
+    elif "arcagi3" in config.env.env_name.lower():
+        from agent_system.environments.env_package.arcagi3.envs import build_arcagi3_envs
+        from agent_system.environments.env_package.arcagi3.projection import arcagi3_projection
+
+        env_dir = getattr(config.env, 'arcagi3', {}).get('env_dir', 'data/environment_files') if hasattr(config.env, 'arcagi3') else 'data/environment_files'
+        render_scale = getattr(config.env, 'arcagi3', {}).get('render_scale', 4) if hasattr(config.env, 'arcagi3') else 4
+
+        _envs = build_arcagi3_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, env_dir=env_dir, render_scale=render_scale, resources_per_worker=resources_per_worker, is_train=True)
+        _val_envs = build_arcagi3_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, env_dir=env_dir, render_scale=render_scale, resources_per_worker=resources_per_worker, is_train=False)
+
+        projection_f = partial(arcagi3_projection)
+        envs = ArcAgi3EnvironmentManager(_envs, projection_f, config)
+        val_envs = ArcAgi3EnvironmentManager(_val_envs, projection_f, config)
+        return envs, val_envs
+
     else:
         print("Environment not supported")
         exit(1)
