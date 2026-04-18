@@ -1,7 +1,6 @@
-"""Prompt templates for ARC-AGI-3 games."""
+"""Prompt templates for ARC-AGI-3 games with memory support."""
 
-ARCAGI3_VISUAL_TEMPLATE = """
-You are playing a puzzle game on a 64x64 pixel grid. You must figure out the rules by trying actions and observing what happens. Your goal is to clear all levels.
+ARCAGI3_VISUAL_TEMPLATE = """You are playing a puzzle game on a 64x64 pixel grid. You must figure out the rules by trying actions and observing what changes. Clear all levels to win.
 
 # Actions
 - ACTION1: Up
@@ -9,20 +8,25 @@ You are playing a puzzle game on a 64x64 pixel grid. You must figure out the rul
 - ACTION3: Left
 - ACTION4: Right
 - ACTION5: Enter/Select
-- ACTION6: Click (needs coordinates)
 - ACTION7: Undo
 
-# Current Step
-Your current observation is shown in the image: <image>
-Your admissible actions are ["ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5", "ACTION7"].
+# Your Memory
+(empty - this is your first step)
 
-Now it's your turn to make a move (choose ONE action only for the current step).
-You should first reason step-by-step about what you see in the image — identify the player, obstacles, and possible goals. Think about what each color might represent and what action would make progress. This reasoning MUST be enclosed within <think> </think> tags.
-Once you've finished your reasoning, choose an action and present it within <action> </action> tags.
+# Current Observation
+The current game state is shown in the image: <image>
+
+# Instructions
+1. First, reason about what you see in <think></think> tags.
+2. Then, write what you have learned so far in <memory></memory> tags. This will be shown to you in future steps. Record:
+   - What each color likely represents (player, wall, goal, etc.)
+   - What actions do (which direction they move things)
+   - Any rules or patterns you discovered
+   - What you should try next and why
+3. Finally, choose ONE action in <action></action> tags.
 """
 
-ARCAGI3_VISUAL_TEMPLATE_WITH_HISTORY = """
-You are playing a puzzle game on a 64x64 pixel grid. You must figure out the rules by trying actions and observing what happens. Your goal is to clear all levels.
+ARCAGI3_VISUAL_TEMPLATE_WITH_HISTORY = """You are playing a puzzle game on a 64x64 pixel grid. You must figure out the rules by trying actions and observing what changes. Clear all levels to win.
 
 # Actions
 - ACTION1: Up
@@ -30,15 +34,23 @@ You are playing a puzzle game on a 64x64 pixel grid. You must figure out the rul
 - ACTION3: Left
 - ACTION4: Right
 - ACTION5: Enter/Select
-- ACTION6: Click (needs coordinates)
 - ACTION7: Undo
 
-# Current Step
-Prior to this step, you have taken {step_count} step(s). Below are your most recent {history_length} actions and what happened: {action_history}
-You are now at step {current_step} and your current observation is shown in the image: <image>
-Your admissible actions are ["ACTION1", "ACTION2", "ACTION3", "ACTION4", "ACTION5", "ACTION7"].
+# Your Memory (from previous steps)
+{memory}
 
-Now it's your turn to make a move (choose ONE action only for the current step).
-You should first reason step-by-step about what you see — what changed after your last action? What pattern do you notice? What should you try next? This reasoning MUST be enclosed within <think> </think> tags.
-Once you've finished your reasoning, choose an action and present it within <action> </action> tags.
+# History (last {history_length} actions)
+Step {current_step}/{step_count} total. Recent actions: {action_history}
+
+# Current Observation
+The current game state is shown in the image: <image>
+
+# Instructions
+1. First, reason about what you see and what changed after your last action in <think></think> tags.
+2. Then, UPDATE your memory in <memory></memory> tags. Keep useful info, discard wrong guesses. Record:
+   - What each color likely represents
+   - What actions do (movement directions, effects)
+   - Any rules or patterns discovered
+   - Current goal and plan
+3. Finally, choose ONE action in <action></action> tags.
 """

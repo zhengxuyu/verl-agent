@@ -1,56 +1,64 @@
-"""Projection function: maps LLM text output to ARC-AGI-3 actions.
+"""Parse LLM output: extract <action>, <memory>, and validity.
 
-LLM outputs: <think>reasoning</think><action>ACTION4</action>
-Maps to: integer action (1-7) for the game engine.
+Returns 3 values: (actions, valids, memories) — unlike other envs which return 2.
 """
+from typing import List, Tuple
 
-from typing import List
+
+ACTION_MAP = {
+    "action1": 1, "action2": 2, "action3": 3, "action4": 4,
+    "action5": 5, "action6": 6, "action7": 7,
+    "up": 1, "down": 2, "left": 3, "right": 4,
+    "enter": 5, "click": 6, "undo": 7,
+}
 
 
-def arcagi3_projection(actions: List[str]):
-    """Parse LLM outputs into ARC-AGI-3 action integers.
+def extract_tag(text, tag):
+    """Extract content between <tag> and </tag>, case-insensitive search."""
+    lower = text.lower()
+    start = lower.find(f"<{tag.lower()}>")
+    end = lower.find(f"</{tag.lower()}>")
+    if start == -1 or end == -1:
+        return None
+    start += len(f"<{tag}>")
+    return text[start:end].strip()
 
-    Expected LLM format:
-        <think>some reasoning about the game state</think>
+
+def arcagi3_projection(actions: List[str]) -> Tuple[list, list, list]:
+    """Parse LLM outputs into ARC-AGI-3 actions + memories.
+
+    Expected format:
+        <think>reasoning</think>
+        <memory>learned rules</memory>
         <action>ACTION4</action>
-
-    Or for click actions:
-        <action>ACTION6 32 40</action>
 
     Returns:
         actions: list of int (0=invalid, 1-7=ACTION1-7)
         valids: list of int (0=invalid format, 1=valid)
+        memories: list of str (extracted memory text)
     """
-    action_map = {
-        "action1": 1, "action2": 2, "action3": 3, "action4": 4,
-        "action5": 5, "action6": 6, "action7": 7,
-        "up": 1, "down": 2, "left": 3, "right": 4,
-        "enter": 5, "click": 6, "undo": 7,
-        "1": 1, "2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7,
-    }
-
     valids = [0] * len(actions)
+    memories = [""] * len(actions)
 
     for i in range(len(actions)):
         original = actions[i]
         text = actions[i].lower()
 
-        # Extract <action>...</action>
-        start_tag = "<action>"
-        end_tag = "</action>"
-        start_idx = text.find(start_tag)
-        end_idx = text.find(end_tag)
+        # Extract memory (case-preserving from original)
+        mem = extract_tag(original, "memory")
+        memories[i] = mem if mem is not None else ""
 
+        # Extract action
+        start = text.find("<action>")
+        end = text.find("</action>")
         try:
-            if start_idx == -1 or end_idx == -1:
+            if start == -1 or end == -1:
                 actions[i] = 0
                 continue
 
-            content = text[start_idx + len(start_tag):end_idx].strip()
-
-            # Try to match action
+            content = text[start + 8:end].strip()
             matched = False
-            for key, val in action_map.items():
+            for key, val in ACTION_MAP.items():
                 if key in content:
                     actions[i] = val
                     valids[i] = 1
@@ -63,10 +71,8 @@ def arcagi3_projection(actions: List[str]):
         except Exception:
             actions[i] = 0
 
-        # Check <think>...</think> exists
-        think_start = original.lower().find("<think>")
-        think_end = original.lower().find("</think>")
-        if think_start == -1 or think_end == -1:
+        # Check <think> exists
+        if "<think>" not in text or "</think>" not in text:
             valids[i] = 0
 
-    return actions, valids
+    return actions, valids, memories
