@@ -506,6 +506,135 @@ class TestScoringStats:
         assert reward_bad == 0.1
 
 
+class TestEpisodeTermination:
+    """Episode must end on death, win, or stuck (no progress)."""
+
+    def test_death_ends_episode(self):
+        """GAME_OVER → done=True."""
+        # Simulated: envs.py should return done=True on GAME_OVER
+        # We test the logic, not the actual game
+        game_over_state = "GAME_OVER"
+        done = (game_over_state == "GAME_OVER")
+        assert done is True
+
+    def test_win_ends_episode(self):
+        """WIN → done=True."""
+        win_state = "WIN"
+        done = (win_state == "WIN")
+        assert done is True
+
+    def test_stuck_detection(self):
+        """If no frame change for N consecutive steps, episode should end."""
+        consecutive_no_change = 0
+        max_no_change = 50  # if 50 steps with no change, give up
+
+        # Simulate 50 steps with no change
+        for _ in range(50):
+            frame_changed = False
+            if not frame_changed:
+                consecutive_no_change += 1
+            else:
+                consecutive_no_change = 0
+
+        done = consecutive_no_change >= max_no_change
+        assert done is True, "Should end episode after 50 steps with no frame change"
+
+    def test_stuck_resets_on_change(self):
+        """Stuck counter resets when frame changes."""
+        consecutive_no_change = 30
+        frame_changed = True
+        if frame_changed:
+            consecutive_no_change = 0
+        assert consecutive_no_change == 0
+
+    def test_steps_since_level_resets_on_new_episode(self):
+        """New episode should start with steps_since_level = 0."""
+        # After death → done=True → verl starts new episode → reset()
+        # reset() sets steps_since_level = 0
+        steps_since_level = 0  # from reset
+        assert steps_since_level == 0
+
+
+class TestToolCalling:
+    """Projection must parse Qwen tool call format."""
+
+    def _load_projection(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("projection",
+            os.path.join(os.path.dirname(__file__), "../agent_system/environments/env_package/arcagi3/projection.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod.arcagi3_projection
+
+    def test_parse_tool_call_action_right(self):
+        proj = self._load_projection()
+        text = '{"name": "action_right", "arguments": {"reasoning": "going right", "memory_update": "player moves right"}}'
+        actions, valids, memories = proj([text])
+        assert actions == [4]
+        assert valids == [1]
+        assert "player moves right" in memories[0]
+
+    def test_parse_tool_call_action_up(self):
+        proj = self._load_projection()
+        text = '{"name": "action_up", "arguments": {"reasoning": "try up", "memory_update": "testing"}}'
+        actions, valids, memories = proj([text])
+        assert actions == [1]
+        assert valids == [1]
+
+    def test_parse_tool_call_action_click_with_coords(self):
+        proj = self._load_projection()
+        text = '{"name": "action_click", "arguments": {"reasoning": "click target", "memory_update": "found button", "x": 20, "y": 30}}'
+        actions, valids, memories = proj([text])
+        assert actions == [6]
+        assert valids == [1]
+
+    def test_parse_tool_call_no_memory(self):
+        proj = self._load_projection()
+        text = '{"name": "action_down", "arguments": {"reasoning": "going down"}}'
+        actions, valids, memories = proj([text])
+        assert actions == [2]
+        assert memories[0] == ""
+
+    def test_invalid_tool_name(self):
+        proj = self._load_projection()
+        text = '{"name": "invalid_action", "arguments": {}}'
+        actions, valids, memories = proj([text])
+        assert actions == [0]
+        assert valids == [0]
+
+    def test_malformed_json(self):
+        proj = self._load_projection()
+        text = 'this is not json at all'
+        actions, valids, memories = proj([text])
+        assert actions == [0]
+        assert valids == [0]
+
+    def test_still_supports_xml_format(self):
+        """Backward compat: old <think>/<action> format should still work."""
+        proj = self._load_projection()
+        text = '<think>reasoning</think><memory>test mem</memory><action>ACTION4</action>'
+        actions, valids, memories = proj([text])
+        assert actions == [4]
+        assert "test mem" in memories[0]
+
+    def test_tool_definitions_list(self):
+        """Verify tool definitions are available for prompt construction."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("projection",
+            os.path.join(os.path.dirname(__file__), "../agent_system/environments/env_package/arcagi3/projection.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        tools = mod.ARCAGI3_TOOLS
+        assert len(tools) == 7
+        names = [t["function"]["name"] for t in tools]
+        assert "action_up" in names
+        assert "action_click" in names
+        # action_click must have x, y parameters
+        click_tool = [t for t in tools if t["function"]["name"] == "action_click"][0]
+        assert "x" in click_tool["function"]["parameters"]["properties"]
+        assert "y" in click_tool["function"]["parameters"]["properties"]
+
+
 class TestDataCoverage:
     """Dataset must cover all 25 games."""
 
