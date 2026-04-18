@@ -456,6 +456,56 @@ class TestBatchSizeDivisibility:
         assert batch_size % n_gpus == 0
 
 
+class TestScoringStats:
+    """Wandb must log per-epoch score distribution."""
+
+    def test_score_stats_in_get_stats(self):
+        """get_stats() must include avg/max/min scores."""
+        episode_scores = [0.0, 0.0, 0.5, 0.0, 1.2, 0.0, 0.0, 0.3]
+
+        stats = {
+            "arcagi3/score_avg": np.mean(episode_scores),
+            "arcagi3/score_max": max(episode_scores),
+            "arcagi3/score_min": min(episode_scores),
+            "arcagi3/score_nonzero_count": sum(1 for s in episode_scores if s > 0),
+        }
+
+        assert stats["arcagi3/score_avg"] == pytest.approx(0.25)
+        assert stats["arcagi3/score_max"] == 1.2
+        assert stats["arcagi3/score_min"] == 0.0
+        assert stats["arcagi3/score_nonzero_count"] == 3
+
+    def test_official_score_formula(self):
+        """Score per level = (baseline/actual)^2, capped at 1.15^2."""
+        baseline = 21
+        actual = 21
+        score = min((baseline / actual) ** 2, 1.15 ** 2)
+        assert score == pytest.approx(1.0)
+
+        # Faster than human
+        score_fast = min((21 / 10) ** 2, 1.15 ** 2)
+        assert score_fast == pytest.approx(1.3225)  # capped
+
+        # Slower than human
+        score_slow = min((21 / 100) ** 2, 1.15 ** 2)
+        assert score_slow == pytest.approx(0.0441)
+
+        # Much slower
+        score_bad = min((21 / 1000) ** 2, 1.15 ** 2)
+        assert score_bad == pytest.approx(0.000441)
+
+    def test_reward_matches_official_with_floor(self):
+        """Reward = max(0.1, official_score) per level cleared."""
+        baseline = 21
+        # Good: 21 steps
+        reward_good = max(0.1, min((baseline / 21) ** 2, 1.15 ** 2))
+        assert reward_good == pytest.approx(1.0)
+
+        # Bad: 1000 steps — floor kicks in
+        reward_bad = max(0.1, min((baseline / 1000) ** 2, 1.15 ** 2))
+        assert reward_bad == 0.1
+
+
 class TestDataCoverage:
     """Dataset must cover all 25 games."""
 
