@@ -309,5 +309,136 @@ class TestWandbStats:
         assert stats["arcagi3/episodes_with_levels"] == 3
 
 
+# ---- Trajectory Logger Tests ----
+
+class TestTrajectoryLogger:
+    """Trajectory logger must record episodes for post-hoc analysis."""
+
+    def test_start_and_end_episode(self, tmp_path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("trajectory_logger",
+            os.path.join(os.path.dirname(__file__), "../agent_system/environments/env_package/arcagi3/trajectory_logger.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        TrajectoryLogger = mod.TrajectoryLogger
+        logger = TrajectoryLogger(log_dir=str(tmp_path))
+        logger.start_episode(0, "ls20")
+        logger.log_step(0, {"action": 4, "reward": 0.0, "done": False, "won": False})
+        logger.log_step(0, {"action": 2, "reward": 0.0, "done": True, "won": False})
+        logger.end_episode(0)
+
+        # Should write to ls20.jsonl
+        log_file = tmp_path / "ls20.jsonl"
+        assert log_file.exists()
+        import json
+        with open(log_file) as f:
+            episode = json.loads(f.readline())
+        assert episode["game_stem"] == "ls20"
+        assert episode["total_steps"] == 2
+        assert episode["total_reward"] == 0.0
+
+    def test_logs_think_and_memory(self, tmp_path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("trajectory_logger",
+            os.path.join(os.path.dirname(__file__), "../agent_system/environments/env_package/arcagi3/trajectory_logger.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        TrajectoryLogger = mod.TrajectoryLogger
+        logger = TrajectoryLogger(log_dir=str(tmp_path))
+        logger.start_episode(0, "cd82")
+        logger.log_step(0, {
+            "action": 4,
+            "think": "I see a blue dot, trying to move right",
+            "memory": "Color 1 = player, ACTION4 = right",
+            "reward": 0.0,
+            "done": False,
+            "won": False,
+        })
+        logger.end_episode(0)
+
+        import json
+        with open(tmp_path / "cd82.jsonl") as f:
+            episode = json.loads(f.readline())
+        step = episode["steps"][0]
+        assert "think" in step
+        assert "memory" in step
+        assert "Color 1 = player" in step["memory"]
+
+    def test_tracks_won_episodes(self, tmp_path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("trajectory_logger",
+            os.path.join(os.path.dirname(__file__), "../agent_system/environments/env_package/arcagi3/trajectory_logger.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        TrajectoryLogger = mod.TrajectoryLogger
+        logger = TrajectoryLogger(log_dir=str(tmp_path))
+        logger.start_episode(0, "ls20")
+        logger.log_step(0, {"action": 4, "reward": 0.0, "done": False, "won": False})
+        logger.log_step(0, {"action": 4, "reward": 1.0, "done": True, "won": True})
+        logger.end_episode(0)
+
+        import json
+        with open(tmp_path / "ls20.jsonl") as f:
+            episode = json.loads(f.readline())
+        assert episode["any_won"] is True
+        assert episode["total_reward"] == 1.0
+
+    def test_multiple_episodes_same_game(self, tmp_path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("trajectory_logger",
+            os.path.join(os.path.dirname(__file__), "../agent_system/environments/env_package/arcagi3/trajectory_logger.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        TrajectoryLogger = mod.TrajectoryLogger
+        logger = TrajectoryLogger(log_dir=str(tmp_path))
+
+        for i in range(3):
+            logger.start_episode(0, "ls20")
+            logger.log_step(0, {"action": 4, "reward": 0.0, "done": True, "won": False})
+            logger.end_episode(0)
+
+        import json
+        with open(tmp_path / "ls20.jsonl") as f:
+            lines = f.readlines()
+        assert len(lines) == 3
+
+    def test_summary_counts_episodes(self, tmp_path):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("trajectory_logger",
+            os.path.join(os.path.dirname(__file__), "../agent_system/environments/env_package/arcagi3/trajectory_logger.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        TrajectoryLogger = mod.TrajectoryLogger
+        logger = TrajectoryLogger(log_dir=str(tmp_path))
+
+        logger.start_episode(0, "ls20")
+        logger.log_step(0, {"action": 4, "reward": 0.0, "done": True, "won": False})
+        logger.end_episode(0)
+
+        logger.start_episode(0, "cd82")
+        logger.log_step(0, {"action": 1, "reward": 0.0, "done": True, "won": False})
+        logger.end_episode(0)
+
+        summary = logger.get_summary()
+        assert summary["logged_episodes_ls20"] == 1
+        assert summary["logged_episodes_cd82"] == 1
+
+
+# ---- Data Coverage Test ----
+
+class TestDataCoverage:
+    """Dataset must cover all 25 games."""
+
+    def test_25_games_in_cluster_data(self):
+        """Verify the cluster has 25-game dataset."""
+        import pandas as pd
+        path = os.path.expanduser("~/data/verl-agent/arcagi3/train.parquet")
+        if not os.path.exists(path):
+            pytest.skip("Dataset not on this machine")
+        df = pd.read_parquet(path)
+        games = set(df["data_source"].tolist())
+        assert len(games) == 25, f"Expected 25 games, got {len(games)}: {games}"
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
