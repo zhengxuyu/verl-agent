@@ -171,36 +171,33 @@ class TestPromptTemplates:
         spec.loader.exec_module(mod)
         return mod
 
-    def test_initial_prompt_has_memory_section(self):
+    def test_system_prompt_mentions_tools(self):
         mod = self._load_prompts()
-        assert "Memory" in mod.ARCAGI3_VISUAL_TEMPLATE or "memory" in mod.ARCAGI3_VISUAL_TEMPLATE
+        assert "tool" in mod.ARCAGI3_SYSTEM_PROMPT.lower()
+        assert "memory_update" in mod.ARCAGI3_SYSTEM_PROMPT.lower()
 
-    def test_initial_prompt_has_image_tag(self):
+    def test_first_step_has_grid_placeholder(self):
         mod = self._load_prompts()
-        assert "<image>" in mod.ARCAGI3_VISUAL_TEMPLATE
+        assert "{grid}" in mod.ARCAGI3_USER_FIRST_STEP
 
-    def test_initial_prompt_instructs_think_memory_action(self):
+    def test_history_prompt_has_memory_and_grid(self):
         mod = self._load_prompts()
-        assert "<think>" in mod.ARCAGI3_VISUAL_TEMPLATE
-        assert "<memory>" in mod.ARCAGI3_VISUAL_TEMPLATE
-        assert "<action>" in mod.ARCAGI3_VISUAL_TEMPLATE
-
-    def test_history_prompt_has_memory_placeholder(self):
-        mod = self._load_prompts()
-        assert "{memory}" in mod.ARCAGI3_VISUAL_TEMPLATE_WITH_HISTORY
+        assert "{memory}" in mod.ARCAGI3_USER_WITH_HISTORY
+        assert "{grid}" in mod.ARCAGI3_USER_WITH_HISTORY
 
     def test_history_prompt_formats_correctly(self):
         mod = self._load_prompts()
-        result = mod.ARCAGI3_VISUAL_TEMPLATE_WITH_HISTORY.format(
+        result = mod.ARCAGI3_USER_WITH_HISTORY.format(
             memory="Color 1 = player",
-            step_count=5,
+            grid="Background color: 0\n. . . .",
             history_length=3,
-            action_history="ACTION4, ACTION2, ACTION1",
+            action_history="Up, Right, Down",
             current_step=6,
         )
         assert "Color 1 = player" in result
-        assert "ACTION4, ACTION2, ACTION1" in result
+        assert "Up, Right, Down" in result
         assert "Step 6" in result
+        assert "Background color: 0" in result
 
 
 # ---- Environment Tests ----
@@ -633,6 +630,74 @@ class TestToolCalling:
         click_tool = [t for t in tools if t["function"]["name"] == "action_click"][0]
         assert "x" in click_tool["function"]["parameters"]["properties"]
         assert "y" in click_tool["function"]["parameters"]["properties"]
+
+
+class TestTextGridMode:
+    """Text grid mode: env returns text, no images."""
+
+    def _load_prompts(self):
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("arcagi3_prompts",
+            os.path.join(os.path.dirname(__file__), "../agent_system/environments/prompts/arcagi3.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_grid_to_text_output(self):
+        """grid_to_text should produce readable 8x8 overview."""
+        mod = self._load_prompts()
+        grid_to_text = mod.grid_to_text
+        frame = np.zeros((64, 64), dtype=int)
+        frame[10, 10] = 1
+        frame[50, 50] = 3
+        text = grid_to_text(frame)
+        assert "Background color: 0" in text
+        assert "." in text  # background cells
+        assert "1" in text  # color 1
+        assert "3" in text  # color 3
+        lines = text.strip().split("\n")
+        assert len(lines) == 9  # 1 header + 8 grid rows
+
+    def test_dataset_has_no_images(self):
+        """Text-mode dataset should not have images column."""
+        import pandas as pd
+        path = os.path.expanduser("~/data/verl-agent/arcagi3/train.parquet")
+        if not os.path.exists(path):
+            pytest.skip("Dataset not on this machine")
+        df = pd.read_parquet(path)
+        assert "images" not in df.columns, "Text mode dataset should not have images"
+
+    def test_dataset_prompt_is_chat_messages(self):
+        """Prompt should be list of chat messages with system + user."""
+        import pandas as pd
+        path = os.path.expanduser("~/data/verl-agent/arcagi3/train.parquet")
+        if not os.path.exists(path):
+            pytest.skip("Dataset not on this machine")
+        df = pd.read_parquet(path)
+        prompt = df.iloc[0]["prompt"]
+        assert isinstance(prompt, (list, np.ndarray))
+        roles = [m["role"] for m in prompt]
+        assert "system" in roles
+        assert "user" in roles
+
+    def test_dataset_prompt_contains_grid(self):
+        """User message should contain the grid text."""
+        import pandas as pd
+        path = os.path.expanduser("~/data/verl-agent/arcagi3/train.parquet")
+        if not os.path.exists(path):
+            pytest.skip("Dataset not on this machine")
+        df = pd.read_parquet(path)
+        user_msg = [m for m in df.iloc[0]["prompt"] if m["role"] == "user"][0]
+        assert "Background color" in user_msg["content"]
+        assert "." in user_msg["content"]
+
+    def test_tools_in_system_prompt(self):
+        """System prompt should mention tools/actions."""
+        mod = self._load_prompts()
+        ARCAGI3_SYSTEM_PROMPT = mod.ARCAGI3_SYSTEM_PROMPT
+        assert "tool" in ARCAGI3_SYSTEM_PROMPT.lower()
+        assert "reasoning" in ARCAGI3_SYSTEM_PROMPT.lower()
+        assert "memory_update" in ARCAGI3_SYSTEM_PROMPT.lower()
 
 
 class TestDataCoverage:
