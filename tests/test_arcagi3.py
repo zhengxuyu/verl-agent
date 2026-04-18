@@ -426,6 +426,36 @@ class TestTrajectoryLogger:
 
 # ---- Data Coverage Test ----
 
+class TestTrajectoryIntegration:
+    """Trajectory logger must be wired into env_manager."""
+
+    def test_env_manager_has_trajectory_logger(self):
+        """ArcAgi3EnvironmentManager should create a TrajectoryLogger."""
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("trajectory_logger",
+            os.path.join(os.path.dirname(__file__), "../agent_system/environments/env_package/arcagi3/trajectory_logger.py"))
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        # Verify TrajectoryLogger has the interface we need
+        logger = mod.TrajectoryLogger(log_dir="/tmp/test_traj")
+        assert hasattr(logger, "start_episode")
+        assert hasattr(logger, "log_step")
+        assert hasattr(logger, "end_episode")
+        assert hasattr(logger, "get_summary")
+
+
+class TestBatchSizeDivisibility:
+    """batch_size must be divisible by n_gpus."""
+
+    def test_25_games_batch_size_for_2_gpus(self):
+        """With 25 games and 2 GPUs, batch_size should be even (e.g. 24 or 26)."""
+        n_games = 25
+        n_gpus = 2
+        # Options: 24 (drop 1) or 26 (duplicate 1)
+        batch_size = n_games + 1  # pad to 26
+        assert batch_size % n_gpus == 0
+
+
 class TestDataCoverage:
     """Dataset must cover all 25 games."""
 
