@@ -517,7 +517,7 @@ class WebshopEnvironmentManager(EnvironmentManagerBase):
                 return
 
 class ArcAgi3EnvironmentManager(EnvironmentManagerBase):
-    """Environment manager for ARC-AGI-3 games with level tracking."""
+    """ARC-AGI-3 environment manager — text grid mode with tool calling."""
 
     ACTION_LOOKUP = {
         0: "Invalid", 1: "Up", 2: "Down", 3: "Left",
@@ -526,67 +526,87 @@ class ArcAgi3EnvironmentManager(EnvironmentManagerBase):
 
     def __init__(self, envs, projection_f, config):
         self.memory = SimpleMemory()
-        # Stats tracking for wandb
+        self.agent_memories = {}
+        self.current_grids = {}
+        from agent_system.environments.env_package.arcagi3.trajectory_logger import TrajectoryLogger
+        self.traj_logger = TrajectoryLogger(log_dir="trajectories")
         self.total_levels_cleared = 0
         self.total_episodes = 0
         self.total_rewards = 0.0
-        self.episode_levels = []  # levels cleared per episode
+        self.episode_levels = []
+        self.episode_scores = []
+        self.game_play_counts = defaultdict(int)
         super().__init__(envs, projection_f, config)
 
     def reset(self, kwargs=None):
         obs, infos = self.envs.reset()
-        obs = np.array(obs, obs[0].dtype)
+
+        for i in range(len(infos)):
+            self.agent_memories[i] = ""
+            self.current_grids[i] = obs[i] if isinstance(obs[i], str) else str(obs[i])
+            stem = infos[i].get("game_stem", "unknown")
+            self.game_play_counts[stem] += 1
+            self.traj_logger.start_episode(i, stem)
 
         observations = {
             'text': self.build_text_obs(infos, init=True),
-            'image': obs,
-            'anchor': obs,
+            'image': None,
+            'anchor': None,
         }
         self.memory.reset(batch_size=len(infos))
         self.total_episodes += len(infos)
         return observations, infos
 
     def step(self, text_actions: List[str]):
-        actions, valids = self.projection_f(text_actions)
+        actions, valids, memories = self.projection_f(text_actions)
+
+        for i, mem in enumerate(memories):
+            if mem:
+                self.agent_memories[i] = mem
 
         next_obs, rewards, dones, infos = self.envs.step(actions)
 
         for i, info in enumerate(infos):
             info['is_action_valid'] = to_numpy(valids[i])
+            self.current_grids[i] = next_obs[i] if isinstance(next_obs[i], str) else str(next_obs[i])
 
-        # Track levels cleared for wandb logging
         for info in infos:
             if info.get('levels_cleared', 0) > 0:
                 self.total_levels_cleared += info['levels_cleared']
 
         self.memory.store({
-            'text_obs': [None] * len(actions),  # visual only
+            'text_obs': [None] * len(actions),
             'action': [self.ACTION_LOOKUP.get(act, "Invalid") for act in actions],
         })
 
-        next_obs = np.array(next_obs, next_obs[0].dtype)
         next_observations = {
             'text': self.build_text_obs(infos),
-            'image': next_obs,
-            'anchor': next_obs,
+            'image': None,
+            'anchor': None,
         }
 
         rewards = to_numpy(rewards)
         dones = to_numpy(dones)
-
-        # Accumulate rewards
         self.total_rewards += float(rewards.sum())
 
-        # Track per-episode levels on done
-        for i, done in enumerate(dones):
-            if done:
+        for i in range(len(actions)):
+            self.traj_logger.log_step(i, {
+                "action": actions[i] if isinstance(actions[i], int) else 0,
+                "memory": self.agent_memories.get(i, ""),
+                "reward": float(rewards[i]),
+                "done": bool(dones[i]),
+                "won": bool(infos[i].get("won", False)),
+                "valid": bool(infos[i].get("is_action_valid", 0)),
+            })
+            if dones[i]:
+                self.traj_logger.end_episode(i)
                 lc = infos[i].get('levels_cleared', 0)
                 self.episode_levels.append(lc)
+                self.episode_scores.append(float(rewards[i]))
 
         return next_observations, rewards, dones, infos
 
     def get_stats(self):
-        """Return stats dict for wandb logging. Called by trainer."""
         stats = {
             'arcagi3/total_levels_cleared': self.total_levels_cleared,
             'arcagi3/total_episodes': self.total_episodes,
@@ -601,11 +621,25 @@ class ArcAgi3EnvironmentManager(EnvironmentManagerBase):
                 sum(1 for l in self.episode_levels if l > 0)
             ),
         }
+        for stem, count in self.game_play_counts.items():
+            stats[f'arcagi3/game_{stem}_plays'] = count
+
+        if self.episode_scores:
+            stats['arcagi3/score_avg'] = float(np.mean(self.episode_scores))
+            stats['arcagi3/score_max'] = float(max(self.episode_scores))
+            stats['arcagi3/score_min'] = float(min(self.episode_scores))
+            stats['arcagi3/score_nonzero_count'] = sum(1 for s in self.episode_scores if s > 0)
+        else:
+            stats['arcagi3/score_avg'] = 0.0
+            stats['arcagi3/score_max'] = 0.0
+            stats['arcagi3/score_min'] = 0.0
+            stats['arcagi3/score_nonzero_count'] = 0
+
         return stats
 
     def build_text_obs(self, infos, init=False):
         from agent_system.environments.prompts.arcagi3 import (
-            ARCAGI3_VISUAL_TEMPLATE, ARCAGI3_VISUAL_TEMPLATE_WITH_HISTORY
+            ARCAGI3_USER_FIRST_STEP, ARCAGI3_USER_WITH_HISTORY
         )
 
         postprocess = []
@@ -616,11 +650,14 @@ class ArcAgi3EnvironmentManager(EnvironmentManagerBase):
                 action_key="action")
 
         for i in range(len(infos)):
+            grid = self.current_grids.get(i, "No grid available")
             if init or self.config.env.history_length <= 0:
-                obs = ARCAGI3_VISUAL_TEMPLATE
+                obs = ARCAGI3_USER_FIRST_STEP.format(grid=grid)
             else:
-                obs = ARCAGI3_VISUAL_TEMPLATE_WITH_HISTORY.format(
-                    step_count=len(self.memory[i]),
+                agent_mem = self.agent_memories.get(i, "(no memory yet)")
+                obs = ARCAGI3_USER_WITH_HISTORY.format(
+                    memory=agent_mem,
+                    grid=grid,
                     history_length=valid_lens[i],
                     action_history=memory_contexts[i],
                     current_step=len(self.memory[i]) + 1,
