@@ -103,11 +103,13 @@ def main():
             ]
 
             from agent_system.environments.env_package.arcagi3.projection import ARCAGI3_TOOLS
+            # Deep copy and ensure all native Python types (no numpy)
+            tools_clean = json.loads(json.dumps(ARCAGI3_TOOLS))
             samples.append({
                 "prompt": prompt,
                 "data_source": stem,
                 "extra_info": {
-                    "tools_kwargs": {"tools": ARCAGI3_TOOLS},
+                    "tools_kwargs": {"tools": tools_clean},
                     "need_tools_kwargs": True,
                 },
             })
@@ -120,7 +122,43 @@ def main():
     test_path = os.path.join(output_dir, "test.parquet")
     df.to_parquet(train_path, index=False)
     df.to_parquet(test_path, index=False)
-    print(f"\nSaved {len(df)} samples to {output_dir}")
+
+    # Verify: read back and check JSON serialization of extra_info
+    df_check = pd.read_parquet(train_path)
+    import numpy as np_check
+    def to_native(obj):
+        """Recursively convert numpy types to native Python."""
+        if isinstance(obj, np_check.ndarray):
+            return [to_native(x) for x in obj.tolist()]
+        elif isinstance(obj, dict):
+            return {k: to_native(v) for k, v in obj.items()}
+        elif isinstance(obj, list):
+            return [to_native(x) for x in obj]
+        elif isinstance(obj, (np_check.integer,)):
+            return int(obj)
+        elif isinstance(obj, (np_check.floating,)):
+            return float(obj)
+        return obj
+
+    # Fix numpy types introduced by parquet round-trip
+    needs_fix = False
+    try:
+        json.dumps(df_check.iloc[0]["extra_info"])
+    except TypeError:
+        needs_fix = True
+
+    if needs_fix:
+        print("Fixing numpy types from parquet round-trip...")
+        for col in df_check.columns:
+            df_check[col] = df_check[col].apply(to_native)
+        df_check.to_parquet(train_path, index=False)
+        df_check.to_parquet(test_path, index=False)
+
+    # Final verification
+    df_final = pd.read_parquet(train_path)
+    ei = to_native(df_final.iloc[0]["extra_info"])
+    json.dumps(ei)  # will raise if still broken
+    print(f"\nSaved {len(df)} samples to {output_dir} (JSON verified)")
 
 
 if __name__ == "__main__":
