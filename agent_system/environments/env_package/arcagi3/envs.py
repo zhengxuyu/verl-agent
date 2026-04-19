@@ -1,72 +1,54 @@
 """ARC-AGI-3 environment for verl-agent.
 
 Each worker holds one game instance. Games are 64x64 pixel grids with
-7 possible actions. Observation is an RGB rendering of the frame.
+7 possible actions. Observation is a text grid (8x8 overview).
 
-Reward: only on level clear, efficiency-based (fewer steps = higher reward).
+Reward: only on level clear, max(0.1, (baseline/actual)^2) capped at 1.15^2.
+Episode ends on: WIN, GAME_OVER (death), or stuck (50 steps no change).
 """
 
 import ray
-import gym
+import gymnasium as gym
 import glob
 import json
 import importlib.util
 import numpy as np
-from PIL import Image
 
 
-# ARC-AGI-3 16-color palette → RGB
-ARC_PALETTE = [
-    (0, 0, 0),        # 0: black
-    (0, 116, 217),     # 1: blue
-    (255, 65, 54),     # 2: red
-    (46, 204, 64),     # 3: green
-    (255, 220, 0),     # 4: yellow
-    (170, 170, 170),   # 5: gray
-    (240, 18, 190),    # 6: magenta
-    (255, 133, 27),    # 7: orange
-    (127, 219, 255),   # 8: light blue
-    (135, 12, 37),     # 9: maroon
-    (0, 0, 0),        # 10: black2
-    (128, 0, 128),     # 11: purple
-    (0, 128, 128),     # 12: teal
-    (128, 128, 0),     # 13: olive
-    (255, 192, 203),   # 14: pink
-    (255, 255, 255),   # 15: white
-]
-
-
-def frame_to_rgb(frame, scale=4):
-    """Convert 64x64 color grid to RGB image.
-
-    Args:
-        frame: 64x64 numpy array of ints 0-15
-        scale: upscale factor (4 → 256x256 output)
-    Returns:
-        numpy array (H, W, 3) uint8
-    """
-    h, w = frame.shape
-    img = np.zeros((h, w, 3), dtype=np.uint8)
-    for c, rgb in enumerate(ARC_PALETTE):
-        mask = frame == c
-        img[mask] = rgb
-
-    if scale > 1:
-        img = np.repeat(np.repeat(img, scale, axis=0), scale, axis=1)
-    return img
+def grid_to_text(frame, scale_to=8):
+    """Convert 64x64 grid to compact 8x8 text overview."""
+    arr = np.array(frame)
+    bg = int(np.bincount(arr.flatten()).argmax())
+    block = 64 // scale_to
+    rows = []
+    for by in range(scale_to):
+        row = []
+        for bx in range(scale_to):
+            blk = arr[by*block:(by+1)*block, bx*block:(bx+1)*block]
+            non_bg = blk[blk != bg]
+            if len(non_bg) > 0:
+                vals, cnts = np.unique(non_bg, return_counts=True)
+                row.append(str(int(vals[cnts.argmax()])))
+            else:
+                row.append(".")
+        rows.append(" ".join(row))
+    return "Background color: " + str(bg) + "\n" + "\n".join(rows)
 
 
 class ArcAgi3Worker:
     """Ray remote actor wrapping one ARC-AGI-3 game instance."""
 
+    MAX_NO_CHANGE = 50  # end episode after 50 steps with no frame change
+
     def __init__(self, game_stem, env_dir, render_scale=4):
         self.game_stem = game_stem
-        self.render_scale = render_scale
         self.game = None
         self.baseline_actions = []
         self.levels_cleared = 0
         self.steps_since_level = 0
         self.total_steps = 0
+        self.consecutive_no_change = 0
+        self.prev_frame_hash = None
 
         # Load game class
         from arcengine import ARCBaseGame, GameAction, ActionInput, GameState
@@ -95,7 +77,7 @@ class ArcAgi3Worker:
             self.baseline_actions = meta.get("baseline_actions", [])
 
     def reset(self, seed_for_reset=None):
-        """Reset game and return initial RGB observation."""
+        """Reset game and return initial text grid observation."""
         self.game = self._game_class()
         result = self.game.perform_action(
             self._ActionInput(id=self._GameAction.RESET))
@@ -103,60 +85,46 @@ class ArcAgi3Worker:
         self.levels_cleared = 0
         self.steps_since_level = 0
         self.total_steps = 0
+        self.consecutive_no_change = 0
 
         frame = np.array(result.frame[0])
-        obs = frame_to_rgb(frame, self.render_scale)
+        text_obs = grid_to_text(frame)
+        self.prev_frame_hash = frame.tobytes()
         info = {
             "available_actions": result.available_actions,
             "game_stem": self.game_stem,
+            "won": False,
         }
-        return obs, info
+        return text_obs, info
 
     def step(self, action):
-        """Execute one action.
-
-        Args:
-            action: int 0-7 mapping:
-                0 = no-op/invalid
-                1-7 = ACTION1-ACTION7
-
-        Returns:
-            obs: RGB image
-            reward: float (only on level clear)
-            done: bool
-            info: dict
-        """
+        """Execute one action. Returns (text_obs, reward, done, info)."""
         if action == 0 or self.game is None:
-            # Invalid action
-            frame = np.zeros((64, 64), dtype=int)
-            if self.game:
-                result = self.game.perform_action(
-                    self._ActionInput(id=self._GameAction.RESET))
-                frame = np.array(result.frame[0])
-            return frame_to_rgb(frame, self.render_scale), 0.0, False, {"valid": False}
+            return "invalid action", 0.0, False, {"valid": False, "won": False}
 
         ga = getattr(self._GameAction, f"ACTION{action}", None)
         if ga is None:
-            return frame_to_rgb(np.zeros((64, 64), dtype=int), self.render_scale), 0.0, False, {"valid": False}
+            return "invalid action", 0.0, False, {"valid": False, "won": False}
 
         data = {}
-        # ACTION6 needs x,y — for now we don't support click from LLM
-        # (will be handled via projection function with coordinates)
+        if action == 6:
+            data = {"x": 32, "y": 32}  # default center click
 
         result = self.game.perform_action(self._ActionInput(id=ga, data=data))
         self.steps_since_level += 1
         self.total_steps += 1
 
         frame = np.array(result.frame[0])
-        obs = frame_to_rgb(frame, self.render_scale)
+        text_obs = grid_to_text(frame)
         reward = 0.0
         done = False
 
-        # Win
+        # Win — all levels cleared
         if result.state == self._GameState.WIN:
             baseline = (self.baseline_actions[self.levels_cleared]
                        if self.levels_cleared < len(self.baseline_actions) else 50)
-            reward = max(0.1, baseline / max(1, self.steps_since_level))
+            ratio = baseline / max(1, self.steps_since_level)
+            reward = max(0.1, min(ratio ** 2, 1.15 ** 2))
             self.levels_cleared = result.levels_completed
             done = True
 
@@ -164,31 +132,38 @@ class ArcAgi3Worker:
         elif result.levels_completed > self.levels_cleared:
             baseline = (self.baseline_actions[self.levels_cleared]
                        if self.levels_cleared < len(self.baseline_actions) else 50)
-            reward = max(0.1, baseline / max(1, self.steps_since_level))
+            ratio = baseline / max(1, self.steps_since_level)
+            reward = max(0.1, min(ratio ** 2, 1.15 ** 2))
             self.levels_cleared = result.levels_completed
             self.steps_since_level = 0
 
-        # Death — just reset, no penalty
+        # Death — episode ends
         elif result.state == self._GameState.GAME_OVER:
-            result = self.game.perform_action(
-                self._ActionInput(id=self._GameAction.RESET))
-            frame = np.array(result.frame[0])
-            obs = frame_to_rgb(frame, self.render_scale)
+            done = True
+
+        # Stuck detection
+        current_hash = frame.tobytes()
+        if current_hash == self.prev_frame_hash:
+            self.consecutive_no_change += 1
+        else:
+            self.consecutive_no_change = 0
+        self.prev_frame_hash = current_hash
+
+        if self.consecutive_no_change >= self.MAX_NO_CHANGE:
+            done = True
 
         info = {
             "levels_cleared": self.levels_cleared,
             "total_steps": self.total_steps,
             "valid": True,
+            "won": done and reward > 0,
+            "stuck": self.consecutive_no_change >= self.MAX_NO_CHANGE,
         }
-        return obs, reward, done, info
+        return text_obs, reward, done, info
 
 
 class ArcAgi3MultiProcessEnv(gym.Env):
-    """Ray-based parallel ARC-AGI-3 environment.
-
-    Manages multiple game instances across Ray workers.
-    Each group of `group_n` workers plays the same game (for GRPO/GiGPO).
-    """
+    """Ray-based parallel ARC-AGI-3 environment."""
 
     def __init__(self, seed=0, env_num=1, group_n=1,
                  env_dir="data/environment_files",
@@ -207,16 +182,14 @@ class ArcAgi3MultiProcessEnv(gym.Env):
 
         np.random.seed(seed)
 
-        # Discover all available games
         self.game_stems = sorted([
-            d for d in glob.os.listdir(env_dir)
-            if glob.os.path.isdir(glob.os.path.join(env_dir, d))
+            d for d in __import__('os').listdir(env_dir)
+            if __import__('os').path.isdir(__import__('os').path.join(env_dir, d))
         ])
 
-        # Create workers: each env_num gets a random game, repeated group_n times
         env_worker = ray.remote(**resources_per_worker)(ArcAgi3Worker)
         self.workers = []
-        self.game_assignments = []  # which game each worker plays
+        self.game_assignments = []
 
         for i in range(env_num):
             stem = self.game_stems[i % len(self.game_stems)]
@@ -229,22 +202,20 @@ class ArcAgi3MultiProcessEnv(gym.Env):
         assert len(actions) == self.num_processes
         futures = [w.step.remote(a) for w, a in zip(self.workers, actions)]
         results = ray.get(futures)
-        obs_list = [r[0] for r in results]
-        reward_list = [r[1] for r in results]
-        done_list = [r[2] for r in results]
-        info_list = [r[3] for r in results]
-        return obs_list, reward_list, done_list, info_list
+        return (
+            [r[0] for r in results],
+            [r[1] for r in results],
+            [r[2] for r in results],
+            [r[3] for r in results],
+        )
 
     def reset(self):
-        # Shuffle game assignments for training variety
         if hasattr(self, 'is_train') and self.is_train:
             np.random.shuffle(self.game_stems)
 
         futures = [w.reset.remote(None) for w in self.workers]
         results = ray.get(futures)
-        obs_list = [r[0] for r in results]
-        info_list = [r[1] for r in results]
-        return obs_list, info_list
+        return [r[0] for r in results], [r[1] for r in results]
 
     def close(self):
         for w in self.workers:
