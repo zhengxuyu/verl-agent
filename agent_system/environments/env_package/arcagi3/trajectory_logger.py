@@ -1,10 +1,10 @@
 """Trajectory logger for ARC-AGI-3 experiments.
 
 Records every step of every episode for post-hoc analysis:
-- VLM output (think, memory, action)
-- Frame changes
-- Reward
-- Game state
+- env observation (grid text)
+- LLM input (full prompt messages)
+- LLM output (raw response)
+- Parsed action, memory, reward, done
 
 Saves to JSONL files, one per game.
 """
@@ -35,18 +35,19 @@ class TrajectoryLogger:
         """Log one step of an episode.
 
         step_data should contain:
-            action: int (1-7)
-            action_text: str (raw VLM output)
-            think: str (extracted think content)
-            memory: str (extracted memory content)
+            action: int (1-7 or 0 for invalid)
+            llm_raw_output: str (full LLM response text)
+            llm_prompt_text: str (user message sent to LLM)
+            grid_text: str (env observation at this step)
+            memory: str (extracted memory_update)
             reward: float
             done: bool
             won: bool
             valid: bool
-            pixels_changed: int (optional)
         """
         if env_idx not in self.episodes:
             return
+        step_data["timestamp"] = time.time()
         self.episodes[env_idx]["steps"].append(step_data)
 
     def end_episode(self, env_idx: int):

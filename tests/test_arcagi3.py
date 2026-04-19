@@ -334,7 +334,7 @@ class TestTrajectoryLogger:
         assert episode["total_steps"] == 2
         assert episode["total_reward"] == 0.0
 
-    def test_logs_think_and_memory(self, tmp_path):
+    def test_logs_full_debug_info(self, tmp_path):
         import importlib.util
         spec = importlib.util.spec_from_file_location("trajectory_logger",
             os.path.join(os.path.dirname(__file__), "../agent_system/environments/env_package/arcagi3/trajectory_logger.py"))
@@ -345,11 +345,13 @@ class TestTrajectoryLogger:
         logger.start_episode(0, "cd82")
         logger.log_step(0, {
             "action": 4,
-            "think": "I see a blue dot, trying to move right",
-            "memory": "Color 1 = player, ACTION4 = right",
+            "llm_raw_output": '{"name": "action_right", "arguments": {"reasoning": "test"}}',
+            "grid_text": "Background color: 0\n. . 1 . . . . .",
+            "memory": "Color 1 = player",
             "reward": 0.0,
             "done": False,
             "won": False,
+            "valid": True,
         })
         logger.end_episode(0)
 
@@ -357,9 +359,12 @@ class TestTrajectoryLogger:
         with open(tmp_path / "cd82.jsonl") as f:
             episode = json.loads(f.readline())
         step = episode["steps"][0]
-        assert "think" in step
+        assert "llm_raw_output" in step
+        assert "grid_text" in step
         assert "memory" in step
-        assert "Color 1 = player" in step["memory"]
+        assert "timestamp" in step
+        assert "action_right" in step["llm_raw_output"]
+        assert "Background color" in step["grid_text"]
 
     def test_tracks_won_episodes(self, tmp_path):
         import importlib.util
