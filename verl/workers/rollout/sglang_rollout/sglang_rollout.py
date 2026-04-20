@@ -271,6 +271,7 @@ class SGLangRollout(BaseRollout):
                 dtype=self.config.dtype,
                 mem_fraction_static=self.config.gpu_memory_utilization,
                 enable_memory_saver=True,
+                disable_cuda_graph=self.config.get("enforce_eager", False),
                 base_gpu_id=0,
                 gpu_id_step=1,
                 tp_size=self._tp_size,
