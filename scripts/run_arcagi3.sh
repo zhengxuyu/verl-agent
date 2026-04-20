@@ -1,11 +1,11 @@
 #!/bin/bash
-#SBATCH --job-name=arc-gigpo
+#SBATCH --job-name=arc-gemma4
 #SBATCH --partition=agent-xlong
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=16
-#SBATCH --mem=64G
+#SBATCH --mem=96G
 #SBATCH --time=5-00:00:00
-#SBATCH --output=gigpo_%j.log
+#SBATCH --output=gigpo_gemma4_%j.log
 
 set -ex
 export PATH=$HOME/.local/bin:$PATH
@@ -17,6 +17,8 @@ unset ROCR_VISIBLE_DEVICES
 
 uv pip install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir 2>&1 | tail -3
 uv pip install -e . 2>&1 | tail -3
+# Gemma 4 needs transformers >= 5.5.0
+uv pip install "transformers>=5.5.0" 2>&1 | tail -3
 
 python3 -c 'import vllm; print("vllm:", vllm.__version__); import flash_attn; print("flash_attn:", flash_attn.__version__)'
 
@@ -35,7 +37,7 @@ python3 -m verl.trainer.main_ppo \
     data.truncation='error' \
     data.return_raw_chat=True \
     +data.need_tools_kwargs=True \
-    actor_rollout_ref.model.path=Qwen/Qwen3-4B \
+    actor_rollout_ref.model.path=google/gemma-4-E4B-it \
     actor_rollout_ref.actor.optim.lr=1e-6 \
     actor_rollout_ref.actor.ppo_mini_batch_size=2 \
     actor_rollout_ref.actor.ppo_micro_batch_size_per_gpu=1 \
@@ -47,8 +49,8 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.model.enable_gradient_checkpointing=True \
     actor_rollout_ref.actor.fsdp_config.param_offload=False \
     +actor_rollout_ref.actor.fsdp_config.model_dtype=bf16 \
-    actor_rollout_ref.actor.fsdp_config.optimizer_offload=False \
-    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=16 \
+    actor_rollout_ref.actor.fsdp_config.optimizer_offload=True \
+    actor_rollout_ref.rollout.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.rollout.tensor_model_parallel_size=2 \
     actor_rollout_ref.rollout.name=vllm \
     actor_rollout_ref.rollout.dtype=bfloat16 \
@@ -58,7 +60,7 @@ python3 -m verl.trainer.main_ppo \
     actor_rollout_ref.rollout.free_cache_engine=False \
     actor_rollout_ref.rollout.val_kwargs.temperature=0.4 \
     actor_rollout_ref.rollout.val_kwargs.do_sample=True \
-    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=16 \
+    actor_rollout_ref.ref.log_prob_micro_batch_size_per_gpu=8 \
     actor_rollout_ref.ref.fsdp_config.param_offload=True \
     actor_rollout_ref.actor.use_invalid_action_penalty=True \
     actor_rollout_ref.actor.invalid_action_penalty_coef=0.1 \
@@ -78,7 +80,7 @@ python3 -m verl.trainer.main_ppo \
     trainer.critic_warmup=0 \
     trainer.logger=['console','wandb'] \
     trainer.project_name=verl_agent_arcagi3 \
-    trainer.experiment_name=gigpo_qwen3_4b_tools \
+    trainer.experiment_name=gigpo_gemma4_e4b_tools \
     trainer.n_gpus_per_node=2 \
     trainer.nnodes=1 \
     trainer.save_freq=1 \

@@ -143,9 +143,30 @@ ARCAGI3_TOOLS = [
 ]
 
 
+def _try_parse_gemma4_call(text: str):
+    """Try to parse Gemma 4 style: call:action_right{reasoning:...,memory_update:...}"""
+    m = re.search(r'call:(\w+)\{(.+?)\}', text, re.DOTALL)
+    if not m:
+        return None
+    name = m.group(1)
+    if name not in TOOL_NAME_TO_ACTION:
+        return None
+    args_str = m.group(2)
+    memory = ""
+    mem_match = re.search(r'memory_update[:\s]*([^,}]+)', args_str)
+    if mem_match:
+        memory = mem_match.group(1).strip()
+    return TOOL_NAME_TO_ACTION[name], memory, 1
+
+
 def _try_parse_tool_call(text: str):
     """Try to parse as JSON tool call. Returns (action_int, memory, valid) or None."""
     text = text.strip()
+
+    # Try Gemma 4 format first: call:function_name{key:value,...}
+    gemma_result = _try_parse_gemma4_call(text)
+    if gemma_result is not None:
+        return gemma_result
 
     # Try to find JSON object in the text
     # Qwen may output: <tool_call>{"name":...}</tool_call> or just {"name":...}
