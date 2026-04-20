@@ -36,13 +36,17 @@ try:
 except ImportError:
     from sglang.srt.entrypoints.openai.protocol import Tool
 from sglang.srt.sampling.sampling_params import SamplingParams
+import socket
+def _get_ip():
+    return socket.gethostbyname(socket.gethostname())
 try:
     from sglang.srt.utils import get_ip, get_open_port
 except ImportError:
-    from sglang.srt.utils.common import get_open_port
-    import socket
-    def get_ip():
-        return socket.gethostbyname(socket.gethostname())
+    get_ip = _get_ip
+    try:
+        from sglang.srt.utils.network import get_open_port
+    except ImportError:
+        from sglang.srt.utils.common import get_open_port
 from tensordict import TensorDict
 from torch.distributed.device_mesh import DeviceMesh, init_device_mesh
 from torch.nn.utils.rnn import pad_sequence
