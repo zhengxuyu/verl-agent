@@ -15,12 +15,11 @@ nvidia-smi --query-gpu=name,memory.total --format=csv,noheader
 source ~/verl-venv/bin/activate
 unset ROCR_VISIBLE_DEVICES
 
-uv pip install flash-attn==2.7.4.post1 --no-build-isolation --no-cache-dir 2>&1 | tail -3
 uv pip install -e . 2>&1 | tail -3
-# Gemma 4 needs transformers >= 5.5.0
-uv pip install "transformers>=5.5.0" 2>&1 | tail -3
+# Gemma 4 needs transformers >= 5.5.0 + compatible huggingface-hub
+uv pip install "transformers>=5.5.0" "huggingface-hub>=1.10" --no-deps 2>&1 | tail -3
 
-python3 -c 'import vllm; print("vllm:", vllm.__version__); import flash_attn; print("flash_attn:", flash_attn.__version__)'
+python3 -c 'import vllm; print("vllm:", vllm.__version__); import transformers; print("transformers:", transformers.__version__); import torch; print("torch:", torch.__version__)'
 
 TRAIN_DATA=$HOME/data/verl-agent/arcagi3/train.parquet
 VAL_DATA=$HOME/data/verl-agent/arcagi3/test.parquet
