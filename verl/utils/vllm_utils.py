@@ -148,9 +148,12 @@ def patch_vllm_moe_model_weight_loader(model):
                 param.weight_loader = experts.weight_loader
 
 
-class TensorLoRARequest(LoRARequest):
-    peft_config:dict = field(default=None)
-    lora_tensors:dict = field(default=None)
+if LoRARequest is not None:
+    class TensorLoRARequest(LoRARequest):
+        peft_config:dict = field(default=None)
+        lora_tensors:dict = field(default=None)
+else:
+    TensorLoRARequest = None
 
 
 class VLLMHijack():
