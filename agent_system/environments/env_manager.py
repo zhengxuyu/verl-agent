@@ -592,7 +592,7 @@ class ArcAgi3EnvironmentManager(EnvironmentManagerBase):
         for i in range(len(actions)):
             self.traj_logger.log_step(i, {
                 "action": actions[i] if isinstance(actions[i], int) else 0,
-                "llm_raw_output": text_actions[i][:500] if i < len(text_actions) else "",
+                "llm_raw_output": str(text_actions[i])[:500] if i < len(text_actions) else "",
                 "grid_text": self.current_grids.get(i, "")[:300],
                 "memory": self.agent_memories.get(i, ""),
                 "reward": float(rewards[i]),

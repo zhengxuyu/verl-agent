@@ -139,8 +139,24 @@ class RLHFDataset(Dataset):
         if self.filter_overlong_prompts:
             tokenizer = self.tokenizer
             prompt_key = self.prompt_key
+            need_tools = self.need_tools_kwargs
+
+            def _filter_fn(doc):
+                kw = dict(add_generation_prompt=True)
+                if need_tools:
+                    _ei = doc.get("extra_info", {})
+                    if isinstance(_ei, str):
+                        import json as _json
+                        try: _ei = _json.loads(_ei)
+                        except: _ei = {}
+                    _tk = _ei.get("tools_kwargs", {}) if isinstance(_ei, dict) else {}
+                    _t = _tk.get("tools", None) if _tk else None
+                    if _t:
+                        kw["tools"] = _t
+                return len(tokenizer.apply_chat_template(doc[prompt_key], **kw)) <= self.max_prompt_length
+
             self.dataframe = self.dataframe.filter(
-                lambda doc: len(tokenizer.apply_chat_template(doc[prompt_key], add_generation_prompt=True)) <= self.max_prompt_length,
+                _filter_fn,
                 num_proc=self.num_workers,
                 desc=f"Filtering prompts longer than {self.max_prompt_length} tokens",
             )
@@ -218,7 +234,22 @@ class RLHFDataset(Dataset):
             row_dict["multi_modal_inputs"].pop("second_per_grid_ts", None)
 
         else:
-            raw_prompt = self.tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+            # Extract tools from extra_info so they are included in the chat template
+            _extra = row_dict.get("extra_info", {})
+            if isinstance(_extra, str):
+                import json as _json
+                try:
+                    _extra = _json.loads(_extra)
+                except (ValueError, TypeError):
+                    _extra = {}
+            if hasattr(_extra, 'item'):
+                _extra = {}
+            _tools_kw = _extra.get("tools_kwargs", {}) if isinstance(_extra, dict) else {}
+            _tools = _tools_kw.get("tools", None) if _tools_kw else None
+            chat_kwargs = dict(add_generation_prompt=True, tokenize=False)
+            if _tools:
+                chat_kwargs["tools"] = _tools
+            raw_prompt = self.tokenizer.apply_chat_template(messages, **chat_kwargs)
             model_inputs = self.tokenizer(raw_prompt, return_tensors="pt", add_special_tokens=False)
             input_ids = model_inputs.pop("input_ids")
             attention_mask = model_inputs.pop("attention_mask")

@@ -24,15 +24,30 @@ def grid_to_text(frame, scale_to=8):
     return f"Background color: {bg}\n" + "\n".join(rows)
 
 
-ARCAGI3_SYSTEM_PROMPT = """You are playing a puzzle game on a 64x64 pixel grid with 16 colors (0-15). You must figure out the rules by trying actions and observing what changes. Clear all levels to win.
+ARCAGI3_SYSTEM_PROMPT = """You are an agent playing ARC-AGI-3, a puzzle game where every game has unique, unknown rules that you must discover through experimentation.
 
-The grid is shown as an 8x8 overview where each cell represents an 8x8 block. "." means background color only.
+## Game Structure
+- Each game is played on a 64x64 pixel grid using 16 colors (0-15).
+- Games have multiple levels. Solve the current level to advance to the next.
+- You do NOT know the rules in advance. You must figure them out by trying actions and observing how the grid changes.
 
-You have tools to take actions. Each tool requires a "reasoning" argument where you explain your thinking, and an optional "memory_update" argument where you record what you've learned. The memory_update will be shown to you in future steps — use it to track:
-- What each color represents (player, wall, goal, etc.)
-- What each action does
-- Rules and patterns you've discovered
-- Your current plan"""
+## Grid Display
+The grid is shown as a compact 8x8 text overview. Each cell summarizes an 8x8 pixel block:
+- A number (e.g. "5", "10") means that color dominates the block.
+- "." means the block contains only the background color.
+- "Background color: N" tells you which color is the background.
+
+## Strategy
+1. **Explore**: Try different actions early to understand what they do in this specific game.
+2. **Observe**: After each action, compare the new grid to the previous one. What moved? What changed color?
+3. **Hypothesize**: Form theories about the rules (e.g. "color 5 is the player", "action_right moves it one cell right").
+4. **Remember**: Use memory_update to record your discoveries. This is your only persistent memory between steps.
+5. **Plan**: Once you understand the rules, work toward clearing the level.
+
+## Important
+- You MUST respond by calling one of the provided tools. Do NOT respond with plain text.
+- Every tool call requires a "reasoning" argument explaining your thinking.
+- Use "memory_update" to save what you've learned — it will be shown to you in future steps."""
 
 
 ARCAGI3_USER_FIRST_STEP = """This is a new game. You know nothing about the rules yet.
@@ -40,7 +55,7 @@ ARCAGI3_USER_FIRST_STEP = """This is a new game. You know nothing about the rule
 Current grid:
 {grid}
 
-Explore by trying different actions to understand what they do."""
+Start exploring — try an action and observe what changes. Call one of the available tools now."""
 
 
 ARCAGI3_USER_WITH_HISTORY = """Your memory from previous steps:
@@ -51,7 +66,7 @@ Step {current_step}. Last {history_length} actions: {action_history}
 Current grid:
 {grid}
 
-Based on what you've learned, choose your next action."""
+Based on what you've learned, call a tool to take your next action."""
 
 
 def build_tools_json():

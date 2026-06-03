@@ -244,7 +244,8 @@ class VLLMHijack():
         def do_hijack(target_cls, target_method_name, hooking_method):
             setattr(target_cls, target_method_name, hooking_method)
 
-        do_hijack(LRUCacheWorkerLoRAManager, "_load_adapter", hijack__load_adapter)
+        if LRUCacheWorkerLoRAManager is not None:
+            do_hijack(LRUCacheWorkerLoRAManager, "_load_adapter", hijack__load_adapter)
 
 
 def is_version_ge(pkg:str='vllm', minver:str="0.7.3"):

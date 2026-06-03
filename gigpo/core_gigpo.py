@@ -33,6 +33,8 @@ The function implemented in this file should be used by trainer with different d
 # ---------------------------------------------------------- #
 def to_hashable(x):
     """Convert an object into a hashable type (used for clustering/grouping)."""
+    if x is None:
+        return None
     if isinstance(x, (int, float, str, bool)):
         return x
     elif isinstance(x, (np.integer, np.floating)):

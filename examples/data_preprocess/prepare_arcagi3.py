@@ -118,10 +118,19 @@ def main():
             print(f"  FAIL: {stem} — {e}")
 
     df = pd.DataFrame(samples)
+
+    # Split: last 5 games for validation, rest for training
+    val_stems = sorted([s["data_source"] for s in samples])[-5:]
+    train_df = df[~df["data_source"].isin(val_stems)].reset_index(drop=True)
+    val_df = df[df["data_source"].isin(val_stems)].reset_index(drop=True)
+
     train_path = os.path.join(output_dir, "train.parquet")
     test_path = os.path.join(output_dir, "test.parquet")
-    df.to_parquet(train_path, index=False)
-    df.to_parquet(test_path, index=False)
+    train_df.to_parquet(train_path, index=False)
+    val_df.to_parquet(test_path, index=False)
+
+    print(f"\nTrain: {len(train_df)} games — {list(train_df['data_source'])}")
+    print(f"Val:   {len(val_df)} games — {list(val_df['data_source'])}")
 
     # Verify: extra_info is a JSON string, survives parquet round-trip
     df_check = pd.read_parquet(train_path)
@@ -130,7 +139,7 @@ def main():
     parsed = json.loads(ei)
     assert "tools_kwargs" in parsed, "Missing tools_kwargs"
     json.dumps(parsed)  # verify JSON serializable
-    print(f"\nSaved {len(df)} samples to {output_dir} (verified)")
+    print(f"Verified parquet round-trip OK")
 
 
 if __name__ == "__main__":

@@ -114,6 +114,8 @@ class ArcAgi3Worker:
         self.steps_since_level += 1
         self.total_steps += 1
 
+        if not result.frame:
+            return "invalid action", 0.0, False, {"valid": False, "won": False}
         frame = np.array(result.frame[0])
         text_obs = grid_to_text(frame)
         reward = 0.0

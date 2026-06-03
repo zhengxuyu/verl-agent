@@ -13,8 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import re
+import time
 import torch
 import numpy as np
+from tqdm import tqdm
 from verl import DataProto
 from verl.utils.dataset.rl_dataset import collate_fn
 from verl.utils.model import compute_position_id_with_mask
@@ -45,15 +48,19 @@ class TrajectoryCollector:
         item: int,
         gen_batch: DataProto,
         obs: Dict,
+        thinking_context: list = None,
+        override_chat_kwargs: dict = None,
     ):
         """
-        Process a single observation sample, organizing environment observations (text and/or images) 
+        Process a single observation sample, organizing environment observations (text and/or images)
         into a format processable by the model.
-        
+
         Parameters:
             item (int): Sample index in the batch
             gen_batch (DataProto): Batch data containing original prompts
             obs (Dict): Environment observation, may contain 'text', 'image', 'anchor' keys
+            thinking_context (list): Optional per-sample thinking text to prepend as assistant turn
+            override_chat_kwargs (dict): Override apply_chat_template kwargs (e.g. enable_thinking)
         
         Returns:
             dict: Contains processed input data such as input_ids, attention_mask, etc.
@@ -79,25 +86,47 @@ class TrajectoryCollector:
         # if '<image>' in obs_content: 
         #     obs_content = obs_content.replace('<image>', '')
 
-        # Build chat structure
+        # Build chat structure: preserve system prompt from original dataset
         obs_content = ''
         if obs_text is not None:
             obs_content += obs_text
         else:
             print(f"Warning: No text observation found!")
 
-        
-        chat = np.array([{
-            "content": obs_content,
-            "role": "user",
-        }])
-        
-        # Apply chat template
+        chat_messages = []
+        # Include system prompt from original raw_prompt
+        if len(raw_prompt) > 0 and raw_prompt[0].get('role') == 'system':
+            chat_messages.append(dict(raw_prompt[0]))
+        chat_messages.append({"content": obs_content, "role": "user"})
+        # Inject thinking context as assistant turn if provided
+        if thinking_context is not None and thinking_context[item]:
+            chat_messages.append({"role": "assistant", "content": thinking_context[item]})
+            chat_messages.append({"role": "user", "content": "Based on your analysis above, call a tool to take your next action. Use memory_update to record what you've learned."})
+        chat = np.array(chat_messages)
+
+        # Include tool definitions if available
+        _tools_kwargs = gen_batch.non_tensor_batch.get('tools_kwargs', None)
+        _tools = None
+        if _tools_kwargs is not None:
+            _tk = _tools_kwargs[item] if hasattr(_tools_kwargs, '__getitem__') else _tools_kwargs
+            if isinstance(_tk, dict):
+                _tools = _tk.get('tools', None)
+        # Ensure tools is pure Python (numpy types from parquet break Jinja templates)
+        if _tools is not None:
+            import json as _json
+            _tools = _json.loads(_json.dumps(_tools, default=str))
+        chat_template_kwargs = dict(apply_chat_template_kwargs)
+        if override_chat_kwargs:
+            chat_template_kwargs.update(override_chat_kwargs)
+        if _tools:
+            chat_template_kwargs['tools'] = _tools
+
+        # Apply chat template — convert chat to list for Jinja compatibility
         prompt_with_chat_template = self.tokenizer.apply_chat_template(
-            chat,
+            chat.tolist() if isinstance(chat, np.ndarray) else chat,
             add_generation_prompt=True,
             tokenize=False,
-            **apply_chat_template_kwargs
+            **chat_template_kwargs
         )
         
         # Initialize return dict
@@ -189,25 +218,26 @@ class TrajectoryCollector:
 
     def preprocess_batch(
         self,
-        gen_batch: DataProto, 
-        obs: Dict, 
+        gen_batch: DataProto,
+        obs: Dict,
+        thinking_context: list = None,
+        override_chat_kwargs: dict = None,
     ) -> DataProto:
         """
         Process a batch of observation samples, converting environment observations into model-processable format.
-        
+
         Parameters:
             gen_batch (DataProto): Batch data containing original prompts
             obs (Dict): Environment observation dictionary
-                - 'text' (None or List[str]): Text observation data
-                - 'image' (np.ndarray or torch.Tensor): Image observation data
-                - 'anchor' (None or Any): Anchor observation without any histories or additional info. (for GiGPO only).
-        
+            thinking_context (list): Optional per-sample thinking text
+            override_chat_kwargs (dict): Override chat template kwargs
+
         Returns:
             DataProto: Contains processed batch data with preserved metadata
         """
         batch_size = len(gen_batch.batch['input_ids'])
         processed_samples = []
-        
+
         # Process each sample in parallel
         for item in range(batch_size):
             # Extract per-sample observations
@@ -215,6 +245,8 @@ class TrajectoryCollector:
                 item=item,
                 gen_batch=gen_batch,
                 obs=obs,
+                thinking_context=thinking_context,
+                override_chat_kwargs=override_chat_kwargs,
             )
             processed_samples.append(processed)
         
@@ -329,10 +361,51 @@ class TrajectoryCollector:
         episode_rewards = np.zeros(batch_size, dtype=np.float32)
         tool_callings = np.zeros(batch_size, dtype=np.float32)
         # Trajectory collection loop
-        for _step in range(self.config.env.max_steps):
+        total_valid_actions = 0
+        total_invalid_actions = 0
+        rollout_start_time = time.time()
+        pbar = tqdm(range(self.config.env.max_steps), desc=f"Rollout (bs={batch_size})",
+                     dynamic_ncols=True, mininterval=5)
+        two_step_thinking = self.config.env.get("two_step_thinking", False)
+
+        for _step in pbar:
             active_masks = np.logical_not(is_done)
 
-            batch = self.preprocess_batch(gen_batch=gen_batch, obs=obs)
+            # ---- Optional: Thinking pass (enable_thinking=True) ----
+            thinking_context = None
+            if two_step_thinking:
+                think_batch = self.preprocess_batch(
+                    gen_batch=gen_batch, obs=obs,
+                    override_chat_kwargs={'enable_thinking': True})
+                think_keys = ["input_ids", "attention_mask", "position_ids"]
+                think_nt_keys = ["raw_prompt_ids"]
+                if "multi_modal_data" in think_batch.non_tensor_batch:
+                    think_nt_keys.append("multi_modal_data")
+                if "raw_prompt" in think_batch.non_tensor_batch:
+                    think_nt_keys.append("raw_prompt")
+                if "tools_kwargs" in think_batch.non_tensor_batch:
+                    think_nt_keys.append("tools_kwargs")
+                think_input = think_batch.pop(
+                    batch_keys=think_keys, non_tensor_batch_keys=think_nt_keys)
+                think_input.meta_info = gen_batch.meta_info
+                think_input_padded, think_pad = pad_dataproto_to_divisor(
+                    think_input, actor_rollout_wg.world_size)
+                think_output_padded = actor_rollout_wg.generate_sequences(think_input_padded)
+                think_output = unpad_dataproto(think_output_padded, pad_size=think_pad)
+
+                # Decode thinking and extract <think> content
+                think_texts = self.tokenizer.batch_decode(
+                    think_output.batch['responses'], skip_special_tokens=False)
+                thinking_context = []
+                for t in think_texts:
+                    m = re.search(r'<think>(.*?)</think>', t, re.DOTALL)
+                    thinking_context.append(m.group(1).strip() if m else t[:500])
+
+            # ---- Action pass (enable_thinking=False) ----
+            batch = self.preprocess_batch(
+                gen_batch=gen_batch, obs=obs,
+                thinking_context=thinking_context,
+                override_chat_kwargs={'enable_thinking': False} if two_step_thinking else None)
 
             batch_keys_to_pop = ["input_ids", "attention_mask", "position_ids"]
             non_tensor_batch_keys_to_pop = ["raw_prompt_ids"]
@@ -394,15 +467,43 @@ class TrajectoryCollector:
                 total_batch_list[i].append(batch_list[i])
                 total_infos[i].append(infos[i])
 
+            # Track action validity for progress bar
+            if 'is_action_valid' in infos[0]:
+                step_valid = sum(1 for info in infos if info['is_action_valid'])
+                total_valid_actions += step_valid
+                total_invalid_actions += (int(active_masks.sum()) - step_valid)
+
             # Update done states
             is_done = np.logical_or(is_done, dones)
-                
+
             # Update observations for next step
             obs = next_obs
+
+            # Update progress bar
+            elapsed = time.time() - rollout_start_time
+            avg_step_time = elapsed / (_step + 1)
+            n_active = int((~is_done).sum())
+            total_actions = total_valid_actions + total_invalid_actions
+            valid_rate = total_valid_actions / total_actions * 100 if total_actions > 0 else 0
+            mean_reward = episode_rewards.mean()
+            pbar.set_postfix_str(
+                f"active={n_active}/{batch_size} rwd={mean_reward:.3f} "
+                f"valid={valid_rate:.0f}% s/step={avg_step_time:.1f}s"
+            )
 
             # Break if all environments are done
             if is_done.all():
                 break
+
+        pbar.close()
+        elapsed = time.time() - rollout_start_time
+        total_actions = total_valid_actions + total_invalid_actions
+        valid_pct = total_valid_actions / total_actions * 100 if total_actions > 0 else 0
+        print(f"[Rollout] done: {_step+1} steps, {elapsed:.0f}s total, "
+              f"avg {elapsed/(_step+1):.1f}s/step, "
+              f"valid={total_valid_actions}/{total_actions} ({valid_pct:.0f}%), "
+              f"mean_rwd={episode_rewards.mean():.4f}",
+              flush=True)
         
         success: Dict[str, np.ndarray] = envs.success_evaluator(
                     total_infos=total_infos,
