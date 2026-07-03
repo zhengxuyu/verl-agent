@@ -758,10 +758,16 @@ class ArcDslEnvironmentManager(EnvironmentManagerBase):
     solved_levels/num_levels. Single-turn (max_rounds=1) and multi-turn refine share
     this manager."""
 
+    @property
+    def _multimodal(self):
+        return bool(getattr(getattr(self.config.env, 'arc_dsl', None), 'multimodal', False))
+
     def reset(self, kwargs=None):
         obs, infos = self.envs.reset()
         from arc_rl.verl_env import render_obs_texts
-        return {'text': render_obs_texts(infos, init=True), 'image': None, 'anchor': None}, infos
+        # multimodal: obs is a list of HxWx3 frame images (or None); text carries <image>.
+        image = list(obs) if self._multimodal else None
+        return {'text': render_obs_texts(infos, init=True), 'image': image, 'anchor': None}, infos
 
     def step(self, text_actions):
         actions, valids, memories = self.projection_f(text_actions)
@@ -770,7 +776,8 @@ class ArcDslEnvironmentManager(EnvironmentManagerBase):
             info['is_action_valid'] = to_numpy(valids[i])
             info.setdefault('data_source', 'arc_dsl')
         from arc_rl.verl_env import render_obs_texts
-        next_observations = {'text': render_obs_texts(infos, init=False), 'image': None, 'anchor': None}
+        image = list(next_obs) if self._multimodal else None
+        next_observations = {'text': render_obs_texts(infos, init=False), 'image': image, 'anchor': None}
         return next_observations, to_numpy(rewards), to_numpy(dones), infos
 
 
