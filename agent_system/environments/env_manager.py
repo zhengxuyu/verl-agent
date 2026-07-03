@@ -751,6 +751,29 @@ class AppWorldEnvironmentManager(EnvironmentManagerBase):
                 postprocess_text_obs.append(obs)
         return postprocess_text_obs
 
+
+class ArcDslEnvironmentManager(EnvironmentManagerBase):
+    """DSL-controller refine task (logic in arc_rl.verl_env). The worker renders the
+    exact prompt (initial or refine) into info['text_prompt']; reward per step is
+    solved_levels/num_levels. Single-turn (max_rounds=1) and multi-turn refine share
+    this manager."""
+
+    def reset(self, kwargs=None):
+        obs, infos = self.envs.reset()
+        from arc_rl.verl_env import render_obs_texts
+        return {'text': render_obs_texts(infos, init=True), 'image': None, 'anchor': None}, infos
+
+    def step(self, text_actions):
+        actions, valids, memories = self.projection_f(text_actions)
+        next_obs, rewards, dones, infos = self.envs.step(actions)
+        for i, info in enumerate(infos):
+            info['is_action_valid'] = to_numpy(valids[i])
+            info.setdefault('data_source', 'arc_dsl')
+        from arc_rl.verl_env import render_obs_texts
+        next_observations = {'text': render_obs_texts(infos, init=False), 'image': None, 'anchor': None}
+        return next_observations, to_numpy(rewards), to_numpy(dones), infos
+
+
 def make_envs(config):
     """
     Create enviroments 
@@ -769,6 +792,15 @@ def make_envs(config):
         projection_f = partial(search_projection)
         envs = SearchEnvironmentManager(_envs, projection_f, config)
         val_envs = SearchEnvironmentManager(_val_envs, projection_f, config)
+        return envs, val_envs
+    elif "arc_dsl" in config.env.env_name.lower():
+        from arc_rl.verl_env import build_arc_dsl_envs, arc_dsl_projection
+        _envs = build_arc_dsl_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
+        _val_envs = build_arc_dsl_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)
+
+        projection_f = partial(arc_dsl_projection)
+        envs = ArcDslEnvironmentManager(_envs, projection_f, config)
+        val_envs = ArcDslEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
     elif "gym_cards" in config.env.env_name.lower():
         from agent_system.environments.env_package.gym_cards import build_gymcards_envs, gym_projection
