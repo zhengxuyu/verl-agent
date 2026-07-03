@@ -244,6 +244,12 @@ class VLLMHijack():
         def do_hijack(target_cls, target_method_name, hooking_method):
             setattr(target_cls, target_method_name, hooking_method)
 
+        if LRUCacheWorkerLoRAManager is None:
+            # vLLM 0.19.1 removed vllm.lora.models, so the import block above fell back
+            # to None for all LoRA symbols. LoRA is unused in this project, so skip the
+            # LoRA-manager hijack instead of crashing on None._load_adapter.
+            return
+
         do_hijack(LRUCacheWorkerLoRAManager, "_load_adapter", hijack__load_adapter)
 
 
