@@ -79,26 +79,41 @@ class TrajectoryCollector:
         # if '<image>' in obs_content: 
         #     obs_content = obs_content.replace('<image>', '')
 
-        # Build chat structure
-        obs_content = ''
-        if obs_text is not None:
-            obs_content += obs_text
-        else:
-            print(f"Warning: No text observation found!")
+        # Harness env: the env hands us the FULL chat conversation + tool schema it
+        # built (system + accumulated turns + user) so the training prompt matches
+        # the deployed prompt exactly (incl. function-calling tools).
+        obs_messages_list = obs.get('messages', None)
+        obs_tools_list = obs.get('tools', None)
+        obs_messages = obs_messages_list[item] if obs_messages_list is not None else None
+        obs_tools = obs_tools_list[item] if obs_tools_list is not None else None
 
-        
-        chat = np.array([{
-            "content": obs_content,
-            "role": "user",
-        }])
-        
-        # Apply chat template
-        prompt_with_chat_template = self.tokenizer.apply_chat_template(
-            chat,
-            add_generation_prompt=True,
-            tokenize=False,
-            **apply_chat_template_kwargs
-        )
+        if obs_messages:
+            chat = list(obs_messages)
+            prompt_with_chat_template = self.tokenizer.apply_chat_template(
+                chat,
+                tools=obs_tools,
+                add_generation_prompt=True,
+                tokenize=False,
+                **apply_chat_template_kwargs
+            )
+        else:
+            # Build chat structure (single-turn user obs) for the other envs.
+            obs_content = ''
+            if obs_text is not None:
+                obs_content += obs_text
+            else:
+                print(f"Warning: No text observation found!")
+
+            chat = np.array([{
+                "content": obs_content,
+                "role": "user",
+            }])
+            prompt_with_chat_template = self.tokenizer.apply_chat_template(
+                chat,
+                add_generation_prompt=True,
+                tokenize=False,
+                **apply_chat_template_kwargs
+            )
         
         # Initialize return dict
         row_dict = {}

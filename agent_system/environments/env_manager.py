@@ -781,6 +781,38 @@ class ArcDslEnvironmentManager(EnvironmentManagerBase):
         return next_observations, to_numpy(rewards), to_numpy(dones), infos
 
 
+class ArcHarnessEnvironmentManager(EnvironmentManagerBase):
+    """The REAL ARC3-Inference rollout (logic in arc_rl.harness_env + arc_rl.rollout).
+    Each obs carries the FULL ARC3 chat messages + python tool schema the harness
+    built, so the collector tokenizes the exact test-time prompt (train==test).
+    Reward per step = Δlevels/num_levels from the harness's game.execute_action."""
+
+    def reset(self, kwargs=None):
+        obs, infos = self.envs.reset()  # obs = list of {'messages', 'tools'}
+        return {
+            'text': None,
+            'messages': [o.get('messages') for o in obs],
+            'tools': [o.get('tools') for o in obs],
+            'image': None,
+            'anchor': None,
+        }, infos
+
+    def step(self, text_actions):
+        actions, valids, memories = self.projection_f(text_actions)
+        next_obs, rewards, dones, infos = self.envs.step(actions)
+        for i, info in enumerate(infos):
+            info['is_action_valid'] = to_numpy(valids[i])
+            info.setdefault('data_source', 'arc_harness')
+        next_observations = {
+            'text': None,
+            'messages': [o.get('messages') for o in next_obs],
+            'tools': [o.get('tools') for o in next_obs],
+            'image': None,
+            'anchor': None,
+        }
+        return next_observations, to_numpy(rewards), to_numpy(dones), infos
+
+
 def make_envs(config):
     """
     Create enviroments 
@@ -808,6 +840,15 @@ def make_envs(config):
         projection_f = partial(arc_dsl_projection)
         envs = ArcDslEnvironmentManager(_envs, projection_f, config)
         val_envs = ArcDslEnvironmentManager(_val_envs, projection_f, config)
+        return envs, val_envs
+    elif "arc_harness" in config.env.env_name.lower():
+        from arc_rl.harness_env import build_arc_harness_envs, harness_projection
+        _envs = build_arc_harness_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
+        _val_envs = build_arc_harness_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)
+
+        projection_f = partial(harness_projection)
+        envs = ArcHarnessEnvironmentManager(_envs, projection_f, config)
+        val_envs = ArcHarnessEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
     elif "gym_cards" in config.env.env_name.lower():
         from agent_system.environments.env_package.gym_cards import build_gymcards_envs, gym_projection
