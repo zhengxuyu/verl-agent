@@ -323,7 +323,13 @@ class TrajectoryCollector:
         # Initial observations from the environment
         obs, infos = envs.reset(kwargs=gen_batch.non_tensor_batch.pop('env_kwargs', None))
 
-        lenght_obs = len(obs['text']) if obs['text'] is not None else len(obs['image'])
+        # obs count comes from text/image, or messages for the arc_harness env.
+        if obs.get('text') is not None:
+            lenght_obs = len(obs['text'])
+        elif obs.get('image') is not None:
+            lenght_obs = len(obs['image'])
+        else:
+            lenght_obs = len(obs['messages'])
         assert len(gen_batch.batch) == lenght_obs, f"gen_batch size {len(gen_batch.batch)} does not match obs size {lenght_obs}"
         
         if self.config.env.rollout.n > 0: # env grouping
