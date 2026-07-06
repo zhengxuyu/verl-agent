@@ -198,7 +198,8 @@ class TrajectoryCollector:
         })
 
         if self.config.data.get('return_raw_chat', False):
-            row_dict['raw_prompt'] = chat.tolist()
+            # chat is an np.array (single-user path) or a plain list (arc_harness messages).
+            row_dict['raw_prompt'] = chat.tolist() if hasattr(chat, 'tolist') else list(chat)
         
         return row_dict
 
