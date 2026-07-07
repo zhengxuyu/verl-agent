@@ -1294,19 +1294,31 @@ class RayPPOTrainer:
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
                 # Curriculum-learning panel: cumulative per-game rollout counts as a
-                # wandb bar chart. Logged directly (it's a chart, not a scalar, so it
-                # stays out of `metrics`). Guarded so non-curriculum envs are unaffected.
+                # HORIZONTAL bar chart (game on the y-axis, count on the x-axis), showing
+                # only games actually played so far (curriculum.counts is not preloaded).
+                # matplotlib barh -> wandb.Image; logged directly (not a scalar metric).
                 try:
                     _cur = getattr(getattr(self.envs, "envs", None), "curriculum", None)
-                    if _cur is not None and "wandb" in self.config.trainer.logger:
+                    _counts = _cur.counts if _cur is not None else {}
+                    if _counts and "wandb" in self.config.trainer.logger:
+                        import matplotlib
+
+                        matplotlib.use("Agg")
+                        import matplotlib.pyplot as plt
                         import wandb
 
-                        _counts = _cur.counts
-                        _tbl = wandb.Table(data=[[g, c] for g, c in sorted(_counts.items())],
-                                           columns=["game", "rollouts"])
-                        wandb.log({"curriculum/rollout_counts": wandb.plot.bar(
-                            _tbl, "game", "rollouts", title="Cumulative rollouts per game")},
-                            step=self.global_steps)
+                        _items = sorted(_counts.items(), key=lambda kv: kv[1])  # ascending -> biggest on top
+                        _games = [g for g, _ in _items]
+                        _vals = [c for _, c in _items]
+                        _fig, _ax = plt.subplots(figsize=(7, min(30.0, max(2.0, 0.18 * len(_games)))))
+                        _ax.barh(range(len(_games)), _vals, color="#4C78A8")
+                        _ax.set_yticks(range(len(_games)))
+                        _ax.set_yticklabels(_games, fontsize=max(3, min(8, int(400 / max(1, len(_games))))))
+                        _ax.set_xlabel("rollouts")
+                        _ax.set_title(f"Cumulative rollouts per game ({len(_games)} played)")
+                        _fig.tight_layout()
+                        wandb.log({"curriculum/rollout_counts": wandb.Image(_fig)}, step=self.global_steps)
+                        plt.close(_fig)
                 except Exception as _e:  # noqa: BLE001 — panel is best-effort
                     print(f"[curriculum panel] skipped: {_e}")
 
