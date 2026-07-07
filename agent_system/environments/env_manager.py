@@ -832,23 +832,17 @@ def make_envs(config):
         envs = SearchEnvironmentManager(_envs, projection_f, config)
         val_envs = SearchEnvironmentManager(_val_envs, projection_f, config)
         return envs, val_envs
-    elif "arc_dsl" in config.env.env_name.lower():
-        from arc_rl.verl_env import build_arc_dsl_envs, arc_dsl_projection
-        _envs = build_arc_dsl_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
-        _val_envs = build_arc_dsl_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)
-
-        projection_f = partial(arc_dsl_projection)
-        envs = ArcDslEnvironmentManager(_envs, projection_f, config)
-        val_envs = ArcDslEnvironmentManager(_val_envs, projection_f, config)
-        return envs, val_envs
-    elif "arc_harness" in config.env.env_name.lower():
-        from arc_rl.harness_env import build_arc_harness_envs, harness_projection
-        _envs = build_arc_harness_envs(seed=config.env.seed, env_num=config.data.train_batch_size, group_n=group_n, is_train=True, env_config=config.env)
-        _val_envs = build_arc_harness_envs(seed=config.env.seed + 1000, env_num=config.data.val_batch_size, group_n=1, is_train=False, env_config=config.env)
-
-        projection_f = partial(harness_projection)
-        envs = ArcHarnessEnvironmentManager(_envs, projection_f, config)
-        val_envs = ArcHarnessEnvironmentManager(_val_envs, projection_f, config)
+    elif "arc_dsl" in config.env.env_name.lower() or "arc_harness" in config.env.env_name.lower():
+        # arc_rl owns the config-driven rollout factory: it picks the pipeline
+        # (arc_dsl / arc_harness) + reward + curriculum from config and derives batch
+        # sizing. Here we only pick the matching obs manager (obs formats differ).
+        from arc_rl.rollout import build_rollout_envs, resolve_pipeline
+        _envs, projection_raw = build_rollout_envs(config, is_train=True)
+        _val_envs, _ = build_rollout_envs(config, is_train=False)
+        projection_f = partial(projection_raw)
+        Manager = ArcHarnessEnvironmentManager if resolve_pipeline(config.env) == "arc_harness" else ArcDslEnvironmentManager
+        envs = Manager(_envs, projection_f, config)
+        val_envs = Manager(_val_envs, projection_f, config)
         return envs, val_envs
     elif "gym_cards" in config.env.env_name.lower():
         from agent_system.environments.env_package.gym_cards import build_gymcards_envs, gym_projection
