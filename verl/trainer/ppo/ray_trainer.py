@@ -1293,6 +1293,23 @@ class RayPPOTrainer:
                 n_gpus = self.resource_pool_manager.get_n_gpus()
                 metrics.update(compute_throughout_metrics(batch=batch, timing_raw=timing_raw, n_gpus=n_gpus))
 
+                # Curriculum-learning panel: cumulative per-game rollout counts as a
+                # wandb bar chart. Logged directly (it's a chart, not a scalar, so it
+                # stays out of `metrics`). Guarded so non-curriculum envs are unaffected.
+                try:
+                    _cur = getattr(getattr(self.envs, "envs", None), "curriculum", None)
+                    if _cur is not None and "wandb" in self.config.trainer.logger:
+                        import wandb
+
+                        _counts = _cur.counts
+                        _tbl = wandb.Table(data=[[g, c] for g, c in sorted(_counts.items())],
+                                           columns=["game", "rollouts"])
+                        wandb.log({"curriculum/rollout_counts": wandb.plot.bar(
+                            _tbl, "game", "rollouts", title="Cumulative rollouts per game")},
+                            step=self.global_steps)
+                except Exception as _e:  # noqa: BLE001 — panel is best-effort
+                    print(f"[curriculum panel] skipped: {_e}")
+
                 # TODO: make a canonical logger that supports various backend
                 logger.log(data=metrics, step=self.global_steps)
 
